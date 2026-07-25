@@ -1,0 +1,18 @@
+@import 'tailwindcss';
+@import '@nuxt/ui';
+
+@theme static {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+/*
+ * Technical names and source IDs are read character-by-character — a developer
+ * checking whether it is `account_id` or `accountId` needs the glyphs to be
+ * unambiguous. Everything identifier-ish gets the mono face.
+ */
+.identifier {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: -0.01em;
+}

@@ -1,0 +1,14 @@
+node_modules
+*.log
+.nuxt
+.nitro
+.cache
+.output
+.env
+.env.*
+!.env.example
+dist
+.DS_Store
+
+# Local SQLite database + staged import uploads
+.data/
