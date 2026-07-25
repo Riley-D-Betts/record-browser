@@ -2,7 +2,7 @@
 import { DERIVATION_LANGUAGE_LABELS, SOURCE_KIND_DESCRIPTIONS } from '#shared/constants'
 
 const route = useRoute()
-const { data: field } = await useFetch(`/api/fields/${route.params.id}`)
+const { data: field, refresh } = await useFetch(`/api/fields/${route.params.id}`)
 
 if (!field.value) {
   throw createError({ statusCode: 404, statusMessage: 'No such field', fatal: true })
@@ -13,6 +13,10 @@ useHead({ title: () => field.value?.label ?? 'Field' })
 const isExternalOrigin = computed(
   () => field.value?.sourceKind === 'user_entry' && field.value?.isExternallyPopulated,
 )
+
+const canEdit = useCanEdit()
+const editing = ref(false)
+const deleting = ref(false)
 </script>
 
 <template>
@@ -28,7 +32,8 @@ const isExternalOrigin = computed(
         />
       </NuxtLink>
 
-      <div class="mt-2 flex flex-wrap items-center gap-3">
+      <div class="mt-2 flex flex-wrap items-start justify-between gap-3">
+        <div class="flex flex-wrap items-center gap-3">
         <h1 class="text-xl font-semibold text-highlighted">
           <EntityName :entity="field" />
         </h1>
@@ -49,6 +54,25 @@ const isExternalOrigin = computed(
           color="warning"
           variant="subtle"
         />
+        </div>
+
+        <div v-if="canEdit" class="flex gap-2">
+          <UButton
+            icon="i-lucide-pencil"
+            size="sm"
+            variant="subtle"
+            label="Edit"
+            @click="editing = true"
+          />
+          <UButton
+            icon="i-lucide-trash-2"
+            size="sm"
+            color="neutral"
+            variant="ghost"
+            label="Delete"
+            @click="deleting = true"
+          />
+        </div>
       </div>
 
       <p v-if="field.description" class="mt-2 max-w-3xl text-sm text-muted">
@@ -178,5 +202,21 @@ const isExternalOrigin = computed(
         />
       </div>
     </section>
+
+    <template v-if="canEdit">
+      <FormFieldFormModal
+        v-model:open="editing"
+        :record-id="field.recordId"
+        :field="field"
+        @saved="refresh()"
+      />
+      <FormDeleteWithImpact
+        v-model:open="deleting"
+        :endpoint="`/api/fields/${field.id}`"
+        :entity-label="field.label"
+        entity-kind="field"
+        :redirect-to="`/records/${field.recordId}`"
+      />
+    </template>
   </div>
 </template>

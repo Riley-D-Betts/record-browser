@@ -36,6 +36,10 @@ touch.
 fields whose type disagrees with their source, orphan records, fields nothing reads,
 duplicated or missing identifiers.
 
+**Editing**, gated on role. Records, fields, provenance and relationships are all
+editable in the UI; viewers get the same views without the controls. A delete that
+would break something else refuses and names what depends on it.
+
 **ERD** with real layered layout, module grouping, and collapse — because the answer to
 a 400-node diagram is not a bigger screen.
 
@@ -64,7 +68,7 @@ finds nothing.
 | | |
 |---|---|
 | `pnpm dev` | Run it |
-| `pnpm test` | Unit tests (lineage traversal, search escaping) |
+| `pnpm test` | Unit tests (lineage traversal, search escaping, form validation) |
 | `pnpm db:generate` | Generate a migration after changing the schema |
 | `pnpm db:migrate` / `db:seed` / `db:reset` | Database lifecycle |
 | `pnpm user:create` | Add an account |
@@ -114,6 +118,18 @@ opaque constraint error. Deleting a record uses `PRAGMA defer_foreign_keys` so
 self-contained dependencies resolve naturally while genuine external dependents still
 block.
 
+**Forms cannot express an impossible source.** Provenance is edited through a
+discriminated union, so switching kind swaps the whole editor rather than leaving a
+reference with two upstreams or a derived field with no expression. Validation errors
+come back as `{path, message}` and land next to the input that caused them — h3's
+default is a bare "Validation Error" string with the detail buried, which tells the
+person filling in the form nothing.
+
+**Modal forms reset on open, not on prop identity.** Watching the entity prop as well
+would reset a half-filled form whenever anything else in the app refetched. That is not
+hypothetical: it happened, via a `refreshNuxtData()` with no arguments refreshing every
+`useFetch` in the app.
+
 **Search is literal.** SQL `LIKE` gives `_` and `%` wildcard meaning, and technical
 names are mostly underscores — `Sales_Order` would otherwise match `SalesXOrder`. Terms
 are escaped, with an explicit `ESCAPE` clause.
@@ -138,7 +154,8 @@ these were a first-class source kind, that is a schema change worth making expli
 
 ```
 app/            pages, components, composables   (Nuxt 4 client)
-  components/erd/   the SVG canvas
+  components/erd/    the SVG canvas
+  components/form/   record, field, relationship and delete dialogs
 server/
   api/          route handlers
   db/           Drizzle schema + migrations
@@ -155,8 +172,7 @@ password.
 
 ## Not built yet
 
-CSV and XLSX import (JSON import/export works today), an editing UI for records and
-fields (the API supports full CRUD; the UI is read-only), and saved views.
+CSV and XLSX import (JSON import/export works today) and saved views.
 
 On spreadsheets: the npm `xlsx` package is frozen at 0.18.5 with two unpatched
 high-severity advisories, since SheetJS moved distribution off npm. When that lands it

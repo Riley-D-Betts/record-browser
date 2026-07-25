@@ -2,13 +2,63 @@
 import { CARDINALITY_LABELS } from '#shared/constants'
 
 const route = useRoute()
-const { data: record } = await useFetch(`/api/records/${route.params.id}`)
+const { data: record, refresh } = await useFetch(`/api/records/${route.params.id}`)
 
 if (!record.value) {
   throw createError({ statusCode: 404, statusMessage: 'No such record', fatal: true })
 }
 
 useHead({ title: () => record.value?.label ?? 'Record' })
+
+const canEdit = useCanEdit()
+const toast = useToast()
+
+const editingRecord = ref(false)
+const deletingRecord = ref(false)
+const fieldModalOpen = ref(false)
+const editingField = ref<Record<string, any> | null>(null)
+const deletingField = ref<Record<string, any> | null>(null)
+const relationshipModalOpen = ref(false)
+const editingRelationship = ref<Record<string, any> | null>(null)
+
+function newField() {
+  editingField.value = null
+  fieldModalOpen.value = true
+}
+
+/**
+ * The list endpoint returns fields without their upstream edges, but the source
+ * editor needs them to show what a reference or derived field currently depends on.
+ * Fetch the full field before opening.
+ */
+async function editField(id: string) {
+  editingField.value = await $fetch(`/api/fields/${id}`)
+  fieldModalOpen.value = true
+}
+
+function newRelationship() {
+  editingRelationship.value = null
+  relationshipModalOpen.value = true
+}
+
+function editRelationship(rel: Record<string, any>) {
+  editingRelationship.value = rel
+  relationshipModalOpen.value = true
+}
+
+async function deleteRelationship(id: string) {
+  try {
+    await $fetch(`/api/relationships/${id}`, { method: 'DELETE' })
+    toast.add({ title: 'Relationship removed', color: 'success' })
+    await refresh()
+  } catch (e: any) {
+    toast.add({
+      title: 'Could not remove it',
+      description: e?.data?.statusMessage ?? e.message,
+      color: 'error',
+    })
+  }
+}
 
 const parents = computed(() =>
   (record.value?.relationships ?? []).filter((r) => r.childRecordId === record.value?.id),
@@ -28,17 +78,37 @@ const children = computed(() =>
         <UIcon name="i-lucide-chevron-left" class="size-4" /> Browse
       </NuxtLink>
 
-      <div class="mt-2 flex flex-wrap items-center gap-3">
-        <h1 class="text-xl font-semibold text-highlighted">
-          <EntityName :entity="record" />
-        </h1>
-        <OriginBadge :origin="record.origin" />
-        <UBadge
-          v-if="record.isDeprecated"
-          label="Deprecated"
-          color="warning"
-          variant="subtle"
-        />
+      <div class="mt-2 flex flex-wrap items-start justify-between gap-3">
+        <div class="flex flex-wrap items-center gap-3">
+          <h1 class="text-xl font-semibold text-highlighted">
+            <EntityName :entity="record" />
+          </h1>
+          <OriginBadge :origin="record.origin" />
+          <UBadge
+            v-if="record.isDeprecated"
+            label="Deprecated"
+            color="warning"
+            variant="subtle"
+          />
+        </div>
+
+        <div v-if="canEdit" class="flex gap-2">
+          <UButton
+            icon="i-lucide-pencil"
+            size="sm"
+            variant="subtle"
+            label="Edit"
+            @click="editingRecord = true"
+          />
+          <UButton
+            icon="i-lucide-trash-2"
+            size="sm"
+            color="neutral"
+            variant="ghost"
+            label="Delete"
+            @click="deletingRecord = true"
+          />
+        </div>
       </div>
 
       <p v-if="record.description" class="mt-2 max-w-3xl text-sm text-muted">
@@ -76,9 +146,19 @@ const children = computed(() =>
     </div>
 
     <section>
-      <h2 class="mb-2 text-sm font-medium text-highlighted">
-        Fields <span class="text-muted">({{ record.fields.length }})</span>
-      </h2>
+      <div class="mb-2 flex items-center justify-between">
+        <h2 class="text-sm font-medium text-highlighted">
+          Fields <span class="text-muted">({{ record.fields.length }})</span>
+        </h2>
+        <UButton
+          v-if="canEdit"
+          icon="i-lucide-plus"
+          size="xs"
+          variant="subtle"
+          label="Add field"
+          @click="newField"
+        />
+      </div>
 
       <div class="overflow-x-auto rounded-lg border border-default">
         <table class="w-full text-sm">
@@ -89,6 +169,7 @@ const children = computed(() =>
               <th class="px-3 py-2 font-medium">Source</th>
               <th class="px-3 py-2 font-medium">Origin</th>
               <th class="px-3 py-2 font-medium" />
+              <th v-if="canEdit" class="px-3 py-2" />
             </tr>
           </thead>
           <tbody class="divide-y divide-default">
@@ -146,6 +227,31 @@ const children = computed(() =>
                   />
                 </div>
               </td>
+              <td v-if="canEdit" class="whitespace-nowrap px-3 py-2 text-right">
+                <div class="flex justify-end gap-0.5">
+                  <UButton
+                    icon="i-lucide-pencil"
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    title="Edit field"
+                    @click.stop="editField(field.id)"
+                  />
+                  <UButton
+                    icon="i-lucide-trash-2"
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    title="Delete field"
+                    @click.stop="deletingField = field"
+                  />
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!record.fields.length">
+              <td :colspan="canEdit ? 6 : 5" class="px-3 py-10 text-center text-sm text-muted">
+                No fields yet.
+              </td>
             </tr>
           </tbody>
         </table>
@@ -154,7 +260,18 @@ const children = computed(() =>
 
     <div class="grid gap-6 lg:grid-cols-2">
       <section>
-        <h2 class="mb-2 text-sm font-medium text-highlighted">Parents</h2>
+        <div class="mb-2 flex items-center justify-between">
+          <h2 class="text-sm font-medium text-highlighted">Parents</h2>
+          <UButton
+            v-if="canEdit"
+            icon="i-lucide-plus"
+            size="xs"
+            variant="ghost"
+            color="neutral"
+            label="Add"
+            @click="newRelationship"
+          />
+        </div>
         <div v-if="!parents.length" class="text-sm text-dimmed">
           This record has no parent.
         </div>
@@ -164,14 +281,32 @@ const children = computed(() =>
             :key="rel.id"
             class="rounded-lg border border-default p-3 text-sm"
           >
-            <NuxtLink
-              :to="`/records/${rel.parentRecordId}`"
-              class="font-medium text-highlighted hover:underline"
-            >
-              <EntityName
-                :entity="{ apiName: rel.parentApiName, label: rel.parentLabel, externalId: null }"
-              />
-            </NuxtLink>
+            <div class="flex items-start justify-between gap-2">
+              <NuxtLink
+                :to="`/records/${rel.parentRecordId}`"
+                class="font-medium text-highlighted hover:underline"
+              >
+                <EntityName
+                  :entity="{ apiName: rel.parentApiName, label: rel.parentLabel, externalId: null }"
+                />
+              </NuxtLink>
+              <div v-if="canEdit" class="flex shrink-0 gap-0.5">
+                <UButton
+                  icon="i-lucide-pencil"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  @click="editRelationship(rel)"
+                />
+                <UButton
+                  icon="i-lucide-trash-2"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  @click="deleteRelationship(rel.id)"
+                />
+              </div>
+            </div>
             <div class="mt-1 flex flex-wrap items-center gap-1.5">
               <UBadge
                 :label="CARDINALITY_LABELS[rel.cardinality]"
@@ -194,7 +329,18 @@ const children = computed(() =>
       </section>
 
       <section>
-        <h2 class="mb-2 text-sm font-medium text-highlighted">Children</h2>
+        <div class="mb-2 flex items-center justify-between">
+          <h2 class="text-sm font-medium text-highlighted">Children</h2>
+          <UButton
+            v-if="canEdit"
+            icon="i-lucide-plus"
+            size="xs"
+            variant="ghost"
+            color="neutral"
+            label="Add"
+            @click="newRelationship"
+          />
+        </div>
         <div v-if="!children.length" class="text-sm text-dimmed">
           Nothing hangs off this record.
         </div>
@@ -204,14 +350,32 @@ const children = computed(() =>
             :key="rel.id"
             class="rounded-lg border border-default p-3 text-sm"
           >
-            <NuxtLink
-              :to="`/records/${rel.childRecordId}`"
-              class="font-medium text-highlighted hover:underline"
-            >
-              <EntityName
-                :entity="{ apiName: rel.childApiName, label: rel.childLabel, externalId: null }"
-              />
-            </NuxtLink>
+            <div class="flex items-start justify-between gap-2">
+              <NuxtLink
+                :to="`/records/${rel.childRecordId}`"
+                class="font-medium text-highlighted hover:underline"
+              >
+                <EntityName
+                  :entity="{ apiName: rel.childApiName, label: rel.childLabel, externalId: null }"
+                />
+              </NuxtLink>
+              <div v-if="canEdit" class="flex shrink-0 gap-0.5">
+                <UButton
+                  icon="i-lucide-pencil"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  @click="editRelationship(rel)"
+                />
+                <UButton
+                  icon="i-lucide-trash-2"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  @click="deleteRelationship(rel.id)"
+                />
+              </div>
+            </div>
             <div class="mt-1 flex flex-wrap items-center gap-1.5">
               <UBadge
                 :label="CARDINALITY_LABELS[rel.cardinality]"
@@ -254,9 +418,7 @@ const children = computed(() =>
           </NuxtLink>
           <UIcon name="i-lucide-arrow-right" class="size-3.5 text-dimmed" />
           <NuxtLink :to="`/fields/${dep.fieldId}`" class="hover:underline">
-            <EntityName
-              :entity="record.fields.find((f) => f.id === dep.fieldId)"
-            />
+            <EntityName :entity="record.fields.find((f) => f.id === dep.fieldId)" />
           </NuxtLink>
           <UBadge
             :label="dep.kind"
@@ -268,5 +430,42 @@ const children = computed(() =>
         </li>
       </ul>
     </section>
+
+    <template v-if="canEdit">
+      <FormRecordFormModal
+        v-model:open="editingRecord"
+        :record="record"
+        @saved="refresh()"
+      />
+      <FormFieldFormModal
+        v-model:open="fieldModalOpen"
+        :record-id="record.id"
+        :field="editingField"
+        @saved="refresh()"
+      />
+      <FormRelationshipFormModal
+        v-model:open="relationshipModalOpen"
+        :context-record-id="record.id"
+        :relationship="editingRelationship"
+        @saved="refresh()"
+      />
+      <FormDeleteWithImpact
+        :open="deletingRecord"
+        :endpoint="`/api/records/${record.id}`"
+        :entity-label="record.label"
+        entity-kind="record"
+        redirect-to="/browse"
+        @update:open="deletingRecord = $event"
+      />
+      <FormDeleteWithImpact
+        v-if="deletingField"
+        :open="Boolean(deletingField)"
+        :endpoint="`/api/fields/${deletingField.id}`"
+        :entity-label="deletingField.label"
+        entity-kind="field"
+        @update:open="(v) => !v && (deletingField = null)"
+        @deleted="refresh()"
+      />
+    </template>
   </div>
 </template>

@@ -97,6 +97,14 @@ function clearFilters() {
 const loading = computed(() =>
   tab.value === 'records' ? recordStatus.value === 'pending' : fieldStatus.value === 'pending',
 )
+
+const canEdit = useCanEdit()
+const creatingRecord = ref(false)
+
+async function onRecordCreated(created: any) {
+  // Straight into the new record — the next thing anyone wants is to add its fields.
+  await navigateTo(`/records/${created.id}`)
+}
 </script>
 
 <template>
@@ -141,6 +149,14 @@ const loading = computed(() =>
         {{ tab === 'records' ? recordData?.total ?? 0 : fieldData?.total ?? 0 }}
         {{ tab }}
       </span>
+
+      <UButton
+        v-if="canEdit"
+        icon="i-lucide-plus"
+        size="sm"
+        label="New record"
+        @click="creatingRecord = true"
+      />
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
@@ -277,8 +293,31 @@ const loading = computed(() =>
         v-if="!loading && (tab === 'records' ? !recordData?.rows.length : !fieldData?.rows.length)"
         class="px-3 py-12 text-center text-sm text-muted"
       >
-        Nothing matches those filters.
+        <template v-if="search || activeFilters > 0">Nothing matches those filters.</template>
+        <template v-else-if="tab === 'records'">
+          <p>The catalog is empty.</p>
+          <UButton
+            v-if="canEdit"
+            class="mt-3"
+            size="sm"
+            variant="subtle"
+            icon="i-lucide-plus"
+            label="Add the first record"
+            @click="creatingRecord = true"
+          />
+          <p class="mt-3 text-xs text-dimmed">
+            Or bring a whole schema in at once from
+            <NuxtLink to="/transfer" class="underline">import</NuxtLink>.
+          </p>
+        </template>
+        <template v-else>No fields yet.</template>
       </div>
     </div>
+
+    <FormRecordFormModal
+      v-if="canEdit"
+      v-model:open="creatingRecord"
+      @saved="onRecordCreated"
+    />
   </div>
 </template>

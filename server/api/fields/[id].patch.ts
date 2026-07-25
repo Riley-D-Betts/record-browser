@@ -8,10 +8,7 @@ import { requireEditor } from '../../utils/auth'
 export default defineEventHandler(async (event) => {
   const actor = await requireEditor(event)
   const id = getRouterParam(event, 'id')!
-  const { source, typeDetail, ...patch } = await readValidatedBody(
-    event,
-    fieldPatchSchema.parse,
-  )
+  const { source, typeDetail, ...patch } = await readValidated(event, fieldPatchSchema)
   const db = useDb()
 
   try {
