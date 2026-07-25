@@ -68,25 +68,46 @@ finds nothing.
 | | |
 |---|---|
 | `pnpm dev` | Run it |
-| `pnpm test` | Unit tests (lineage traversal, search escaping, form validation) |
+| `pnpm test` | Unit tests (lineage traversal, import planning, search escaping, form validation) |
 | `pnpm db:generate` | Generate a migration after changing the schema |
 | `pnpm db:migrate` / `db:seed` / `db:reset` | Database lifecycle |
 | `pnpm user:create` | Add an account |
 
 ## Import and export
 
-The catalog round-trips through one JSON format, used by both directions. References
-are written as `Record.field` rather than internal IDs, so an export is portable
-between installs and readable in review.
+### Spreadsheets
+
+Import a CSV exported from the source system — either one row per field with the record
+repeated, or a sheet of records and a sheet of fields imported one after the other.
+Columns are matched to the catalog automatically and you can correct any of them.
+
+You choose what happens to rows that already exist, per import:
+
+| | |
+|---|---|
+| **Only add new rows** | Existing records and fields are left completely alone. |
+| **Fill blanks** (default) | Writes a value only where the catalog has none. Disagreements are listed rather than applied. |
+| **The file wins** | Every value in the file replaces what the catalog holds. |
+
+Nothing is written until you have seen exactly what would change: the preview names the
+columns that would be touched and how many rows each affects, so *"description: 412,
+label: 3"* tells you at a glance whether the import is doing what you meant.
+
+### JSON
+
+The catalog also round-trips through one JSON format, used by both directions.
+References are written as `Record.field` rather than internal IDs, so an export is
+portable between installs and readable in review.
 
 The real payoff is that it is **diffable in git**: commit one per release and
 `git diff` shows exactly what changed in the source application's schema. Round-trip
 fidelity is exact — export, import into an empty database, export again, and the two
 files are identical.
 
-Imports are all-or-nothing. The preview runs the real import inside a transaction and
-then rolls it back, so what you see reflects actual constraint behaviour rather than a
-simulation that can drift from it.
+Imports are all-or-nothing. The JSON path previews by running the real import inside a
+transaction and rolling it back. It only ever **inserts** — it will not update a record
+that already exists, and says how many it skipped so that is visible rather than
+silent. Use the CSV import when you want existing rows updated.
 
 ## Design notes
 
@@ -130,6 +151,26 @@ would reset a half-filled form whenever anything else in the app refetched. That
 hypothetical: it happened, via a `refreshNuxtData()` with no arguments refreshing every
 `useFetch` in the app.
 
+**A column a file does not have can never change anything.** The CSV planner takes its
+candidate columns from the header row once per file, so a sparse spreadsheet is
+structurally incapable of wiping the columns it omits — they are never candidates,
+rather than candidates that happen to be guarded.
+
+**`false` is a value, not a blank.** Fill-blanks writes only where the catalog has
+nothing, and a boolean always has something. If `false` counted as blank, any file
+carrying those columns would flip every one of them — an overwrite wearing a
+fill-blanks badge. The visible consequence, stated in the UI rather than buried:
+fill-blanks cannot change a yes/no column on a row that already exists.
+
+**Clearing is separate from strategy.** In a CSV, "clear this" and "I don't have that
+data" are the same bytes, so "the file wins" does not empty a value from an empty cell.
+That needs its own opt-in.
+
+**A rename is reported, never applied silently.** When a file's source ID matches a row
+whose technical name differs, the source system renamed something — which is precisely
+the kind of thing a catalog exists to notice. It is surfaced as a per-row opt-in and
+reported even when declined.
+
 **Search is literal.** SQL `LIKE` gives `_` and `%` wildcard meaning, and technical
 names are mostly underscores — `Sales_Order` would otherwise match `SalesXOrder`. Terms
 are escaped, with an explicit `ESCAPE` clause.
@@ -172,8 +213,15 @@ password.
 
 ## Not built yet
 
-CSV and XLSX import (JSON import/export works today) and saved views.
+**XLSX import** — CSV only for now. npm's `xlsx` is frozen at 0.18.5 with two unpatched
+high-severity advisories since SheetJS moved distribution off npm, so if this is wanted
+it should use `exceljs`, not the stale registry package.
 
-On spreadsheets: the npm `xlsx` package is frozen at 0.18.5 with two unpatched
-high-severity advisories, since SheetJS moved distribution off npm. When that lands it
-should use `exceljs` plus `papaparse` rather than the stale registry package.
+**Provenance and relationships via CSV.** A spreadsheet describes records and fields
+only. Provenance has to be routed through `setFieldSource` to keep its dependency rows
+consistent, and `source_kind` carries a CHECK that a blank expression violates at the
+database level — so accepting it from a sheet needs more care than a column mapping.
+
+**Saved views**, and a screen for reviewing an import batch after the fact. Every
+imported row now writes an audit entry sharing a batch id, so the data is there; nothing
+reads it back yet.

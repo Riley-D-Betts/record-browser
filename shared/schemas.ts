@@ -25,7 +25,7 @@ const idSchema = z.string().min(1).max(128)
  * Technical names get a deliberately tight grammar. This is the identifier that gets
  * typed into code, so spaces and punctuation are a correctness problem, not a style one.
  */
-const apiNameSchema = z
+export const apiNameSchema = z
   .string({ error: 'Technical name is required' })
   .min(1, 'Technical name is required')
   .max(128)

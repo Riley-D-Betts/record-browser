@@ -168,6 +168,14 @@ export interface ImportSummary {
   records: number
   fields: number
   relationships: number
+  /**
+   * Rows the document described that already existed and were therefore left alone.
+   *
+   * This path only ever inserts. Without these counts a re-import of a changed export
+   * reports "0 records, 0 fields" and looks like a no-op file rather than forty
+   * dropped updates. Use the CSV importer when you want existing rows updated.
+   */
+  skippedExisting: { records: number; fields: number }
   warnings: string[]
 }
 
@@ -195,6 +203,7 @@ export function importCatalog(
     records: 0,
     fields: 0,
     relationships: 0,
+    skippedExisting: { records: 0, fields: 0 },
     warnings,
   }
 
@@ -278,6 +287,8 @@ export function importCatalog(
         .all()[0].id
       recordIdByApiName.set(apiName, recordId!)
       summary.records++
+    } else {
+      summary.skippedExisting.records++
     }
 
     const incomingFields = (rec.fields as Array<Record<string, unknown>>) ?? []
@@ -319,6 +330,8 @@ export function importCatalog(
           .all()[0].id
         fieldIdByRef.set(refKey, fieldId!)
         summary.fields++
+      } else {
+        summary.skippedExisting.fields++
       }
 
       if (f.source) deferredSources.push({ fieldId: fieldId!, source: f.source, ref: refKey })
