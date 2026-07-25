@@ -7,10 +7,7 @@ import { requireEditor } from '../../utils/auth'
 
 export default defineEventHandler(async (event) => {
   const actor = await requireEditor(event)
-  const { source, typeDetail, ...input } = await readValidatedBody(
-    event,
-    fieldInputSchema.parse,
-  )
+  const { source, typeDetail, ...input } = await readValidated(event, fieldInputSchema)
   const db = useDb()
 
   try {

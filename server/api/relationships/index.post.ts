@@ -6,7 +6,7 @@ import { requireEditor } from '../../utils/auth'
 
 export default defineEventHandler(async (event) => {
   const actor = await requireEditor(event)
-  const input = await readValidatedBody(event, relationshipInputSchema.parse)
+  const input = await readValidated(event, relationshipInputSchema)
   const db = useDb()
 
   return db.transaction((tx) => {

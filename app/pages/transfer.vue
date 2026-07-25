@@ -86,6 +86,17 @@ const summaryRows = computed(() =>
       ]
     : [],
 )
+
+/**
+ * The JSON path only inserts. Saying so out loud matters: without it, re-importing a
+ * changed export reports "0 records, 0 fields" and reads like an empty file rather
+ * than forty updates that were dropped on the floor.
+ */
+const skipped = computed(() => {
+  const s = preview.value?.skippedExisting
+  if (!s) return null
+  return s.records + s.fields > 0 ? s : null
+})
 </script>
 
 <template>
@@ -159,6 +170,15 @@ const summaryRows = computed(() =>
         </div>
 
         <UAlert
+          v-if="skipped"
+          color="info"
+          variant="subtle"
+          icon="i-lucide-info"
+          :title="`${skipped.records + skipped.fields} already in the catalog and left untouched`"
+          description="This importer only adds what is missing — it never updates an existing row. To bring changed values in, use the CSV import below, which lets you choose what happens to rows that already exist."
+        />
+
+        <UAlert
           v-if="preview.warnings?.length"
           color="warning"
           variant="subtle"
@@ -197,6 +217,20 @@ const summaryRows = computed(() =>
             "
           />
         </div>
+      </div>
+    </section>
+
+    <section class="rounded-lg border border-default p-4">
+      <h2 class="text-sm font-medium text-highlighted">Import a spreadsheet</h2>
+      <p class="mt-1 text-sm text-muted">
+        A CSV exported from the source system — either one row per field with the record
+        repeated, or a sheet of records and a sheet of fields imported one after the
+        other. Columns are matched to the catalog automatically and you can correct
+        them. Nothing is written until you have seen exactly what would change.
+      </p>
+
+      <div class="mt-4">
+        <ImportCsvImportWizard @imported="refreshNuxtData()" />
       </div>
     </section>
   </div>

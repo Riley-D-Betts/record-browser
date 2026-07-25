@@ -16,7 +16,7 @@ const getDecoyHash = () =>
   (decoyHash ??= hashPassword(`decoy-${crypto.randomUUID()}`))
 
 export default defineEventHandler(async (event) => {
-  const { email, password } = await readValidatedBody(event, loginSchema.parse)
+  const { email, password } = await readValidated(event, loginSchema)
   const db = useDb()
 
   const user = db

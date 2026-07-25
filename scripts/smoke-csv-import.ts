@@ -1,0 +1,300 @@
+/**
+ * End-to-end checks for CSV import against a real database.
+ *
+ * The planner has unit tests; this exercises the parts that only exist once a
+ * catalog is involved — identity matching, the record/field ordering, and the
+ * promise that re-importing what the catalog already says changes nothing.
+ */
+import { rmSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { eq, sql } from 'drizzle-orm'
+import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
+import { createDb, dataTypes, fields, modules, records } from '../server/db'
+import { applyCsvImport, planCsvImport } from '../server/services/csvImport'
+import type { Strategy } from '../shared/csvColumns'
+
+const DB_PATH = '.data/csv-smoke.db'
+for (const suffix of ['', '-wal', '-shm']) {
+  rmSync(resolve(`${DB_PATH}${suffix}`), { force: true })
+}
+
+const db = createDb(DB_PATH)
+migrate(db, { migrationsFolder: resolve('server/db/migrations') })
+
+let failures = 0
+const ok = (m: string) => console.log(`  ok   ${m}`)
+const fail = (m: string) => {
+  failures++
+  console.error(`  FAIL ${m}`)
+}
+const check = (cond: boolean, m: string) => (cond ? ok(m) : fail(m))
+
+// --- fixture ---------------------------------------------------------------
+
+db.insert(dataTypes).values({ key: 'text', label: 'Text' }).run()
+db.insert(dataTypes).values({ key: 'currency', label: 'Currency' }).run()
+db.insert(modules).values({ key: 'sales', name: 'Sales' }).run()
+
+const MAPPING = {
+  record_api_name: 'Object',
+  record_label: 'Object Label',
+  record_external_id: 'Object ID',
+  field_api_name: 'Field',
+  field_label: 'Field Label',
+  field_type: 'Type',
+  field_description: 'Description',
+  field_required: 'Required',
+}
+
+const row = (o: Partial<Record<string, string>>) => ({
+  Object: '',
+  'Object Label': '',
+  'Object ID': '',
+  Field: '',
+  'Field Label': '',
+  Type: '',
+  Description: '',
+  Required: '',
+  ...o,
+})
+
+function run(
+  rows: Array<Record<string, string>>,
+  strategy: Strategy,
+  extra: { emptyCellsClear?: boolean; approvedRenames?: number[]; mapping?: any } = {},
+) {
+  const batchId = crypto.randomUUID()
+  const input = {
+    mapping: extra.mapping ?? MAPPING,
+    rows,
+    strategy,
+    emptyCellsClear: extra.emptyCellsClear ?? false,
+    approvedRenames: extra.approvedRenames ?? [],
+  }
+  const planned = planCsvImport(db, input, batchId)
+  return { planned, apply: () => applyCsvImport(db, planned, null, batchId) }
+}
+
+// --- 1. first import creates -----------------------------------------------
+
+console.log('\nFirst import')
+{
+  const { planned, apply } = run(
+    [
+      row({ Object: 'Account', 'Object Label': 'Account', 'Object ID': 'X1', Field: 'Name', 'Field Label': 'Account Name', Type: 'Text', Description: 'The account name.', Required: 'yes' }),
+      row({ Object: 'Account', 'Object ID': 'X1', Field: 'Balance', Type: 'Currency', Required: 'no' }),
+      row({ Object: 'Invoice', 'Object Label': 'Invoice', 'Object ID': 'X2', Field: 'Total', Type: 'Currency' }),
+    ],
+    'fill-blanks',
+  )
+  check(planned.preview.errors.length === 0, 'no errors')
+  check(planned.preview.shape === 'fields', 'detected a field sheet')
+  check(planned.preview.counts.records.create === 2, 'plans 2 records (repeats collapsed)')
+  check(planned.preview.counts.fields.create === 3, 'plans 3 fields')
+
+  const applied = apply()
+  check(applied.recordsCreated === 2 && applied.fieldsCreated === 3, 'applied 2 records, 3 fields')
+  check(
+    db.select().from(fields).all().find((f) => f.apiName === 'Balance')?.label === 'Balance',
+    'a field with no label falls back to its technical name',
+  )
+  check(
+    db.select().from(fields).all().find((f) => f.apiName === 'Name')?.isRequired === true,
+    'Required=yes coerced to true',
+  )
+}
+
+// --- 2. re-importing the same file changes nothing --------------------------
+
+console.log('\nRe-importing the identical file')
+for (const strategy of ['create-only', 'fill-blanks', 'overwrite'] as Strategy[]) {
+  const { planned } = run(
+    [
+      row({ Object: 'Account', 'Object Label': 'Account', 'Object ID': 'X1', Field: 'Name', 'Field Label': 'Account Name', Type: 'Text', Description: 'The account name.', Required: 'yes' }),
+      row({ Object: 'Account', 'Object ID': 'X1', Field: 'Balance', Type: 'Currency', Required: 'no' }),
+      row({ Object: 'Invoice', 'Object Label': 'Invoice', 'Object ID': 'X2', Field: 'Total', Type: 'Currency' }),
+    ],
+    strategy,
+  )
+  const c = planned.preview.counts
+  const touched = c.records.create + c.records.update + c.fields.create + c.fields.update
+  check(touched === 0, `${strategy}: nothing created or updated`)
+}
+
+// --- 3. fill-blanks fills a hole but protects prose -------------------------
+
+console.log('\nfill-blanks')
+{
+  const { planned, apply } = run(
+    [
+      row({ Object: 'Account', Field: 'Balance', Description: 'Now described.' }),
+      row({ Object: 'Account', Field: 'Name', Description: 'Autogenerated rubbish.' }),
+    ],
+    'fill-blanks',
+  )
+  check(planned.preview.counts.fields.update === 1, 'updates only the field that had no description')
+  const suppressed = planned.preview.rows.find((r) => r.key === 'Account.Name')?.suppressed
+  check(suppressed?.length === 1, 'reports the disagreement it declined to apply')
+  apply()
+  const name = db.select().from(fields).all().find((f) => f.apiName === 'Name')
+  check(name?.description === 'The account name.', 'hand-written description survived')
+}
+
+// --- 4. a sparse file under overwrite touches only its own columns ----------
+
+console.log('\nSparse file under overwrite')
+{
+  const before = db.select().from(fields).all().find((f) => f.apiName === 'Name')!
+  const { planned, apply } = run(
+    [row({ Object: 'Account', Field: 'Name', Description: 'Replaced by the source system.' })],
+    'overwrite',
+    { mapping: { record_api_name: 'Object', field_api_name: 'Field', field_description: 'Description' } },
+  )
+  apply()
+  const after = db.select().from(fields).all().find((f) => f.apiName === 'Name')!
+  check(after.description === 'Replaced by the source system.', 'the named column was replaced')
+  check(after.label === before.label, 'label untouched — the file did not carry that column')
+  check(after.isRequired === before.isRequired, 'required untouched')
+  check(after.dataTypeId === before.dataTypeId, 'type untouched')
+}
+
+// --- 5. identity: ambiguity, duplicates, rename -----------------------------
+
+console.log('\nIdentity')
+{
+  // Two records share a source ID, which the schema permits and the importer must not guess about.
+  db.insert(records).values({ apiName: 'Dup_A', label: 'A', externalId: 'SHARED' }).run()
+  db.insert(records).values({ apiName: 'Dup_B', label: 'B', externalId: 'SHARED' }).run()
+
+  const { planned } = run(
+    [row({ Object: 'Something_Else', 'Object ID': 'SHARED', Field: 'F' })],
+    'fill-blanks',
+  )
+  check(
+    planned.preview.errors.some((e) => e.code === 'AMBIGUOUS_EXTERNAL_ID'),
+    'an ambiguous source ID is an error, not a guess',
+  )
+}
+{
+  const { planned } = run(
+    [
+      row({ Object: 'Account', Field: 'Name' }),
+      row({ Object: 'Account', Field: 'Name', Description: 'Second opinion' }),
+    ],
+    'fill-blanks',
+  )
+  const dupes = planned.preview.errors.filter((e) => e.code === 'DUPLICATE_IN_FILE')
+  check(dupes.length === 2, 'the same field twice in one file errors on both rows')
+}
+{
+  // The source system renamed Invoice to Billing_Document; matched by source ID.
+  const { planned } = run(
+    [row({ Object: 'Billing_Document', 'Object ID': 'X2', Field: 'Total', Type: 'Currency' })],
+    'overwrite',
+  )
+  check(planned.preview.renames.length === 1, 'the rename is noticed')
+  check(
+    planned.preview.renames[0]?.from === 'Invoice' &&
+      planned.preview.renames[0]?.to === 'Billing_Document',
+    'and reported from/to',
+  )
+  const rec = planned.preview.rows.find((r) => r.entity === 'record')
+  check(
+    rec?.suppressed.some((s) => s.column === 'apiName') === true,
+    'but not applied without approval',
+  )
+
+  const approved = run(
+    [row({ Object: 'Billing_Document', 'Object ID': 'X2', Field: 'Total', Type: 'Currency' })],
+    'overwrite',
+    { approvedRenames: [2] },
+  )
+  approved.apply()
+  check(
+    Boolean(db.select().from(records).all().find((r) => r.apiName === 'Billing_Document')),
+    'and applied once approved',
+  )
+}
+
+// --- 6. a field naming an unknown record is refused -------------------------
+
+console.log('\nOrphan field rows')
+{
+  const { planned } = run(
+    [row({ Object: 'Nonexistent_Record', Field: 'Whatever' })],
+    'fill-blanks',
+    { mapping: { record_api_name: 'Object', field_api_name: 'Field' } },
+  )
+  // With no record columns beyond the name, the record is planned as a create, so the
+  // field resolves. Naming no record at all is the real orphan case.
+  const orphan = run([row({ Field: 'Loose' })], 'fill-blanks', {
+    mapping: { field_api_name: 'Field' },
+  })
+  check(
+    orphan.planned.preview.errors.some((e) => e.code === 'PARENT_RECORD_NOT_FOUND'),
+    'a field row naming no record is refused',
+  )
+  check(planned.preview.counts.records.create === 1, 'a new record named on a field row is created')
+}
+
+// --- 7. bad values are reported, not silently dropped -----------------------
+
+console.log('\nBad values')
+{
+  const { planned } = run(
+    [row({ Object: 'Account', Field: 'Weird', Required: 'perhaps' })],
+    'fill-blanks',
+  )
+  check(
+    planned.preview.errors.some((e) => e.code === 'UNKNOWN_ENUM'),
+    'an unreadable yes/no value is reported',
+  )
+}
+{
+  const { planned } = run(
+    [row({ Object: 'has spaces', Field: 'X' })],
+    'fill-blanks',
+  )
+  check(
+    planned.preview.errors.some((e) => e.code === 'INVALID_API_NAME'),
+    'a technical name with spaces is refused, same grammar as the forms',
+  )
+}
+{
+  const { planned } = run(
+    [row({ Object: 'Account', Field: 'Typed', Type: 'NoSuchType' })],
+    'fill-blanks',
+  )
+  check(
+    planned.preview.warnings.some((w) => w.includes('NoSuchType')),
+    'an unknown type is a warning and the field is still importable',
+  )
+}
+
+// --- 8. audit rows share a batch --------------------------------------------
+
+console.log('\nAudit')
+{
+  const { apply } = run(
+    [row({ Object: 'Audited_Record', 'Object Label': 'Audited', Field: 'Thing' })],
+    'fill-blanks',
+  )
+  apply()
+  const log = db.all<{ batch_id: string; action: string; entity_type: string }>(
+    sql`select batch_id, action, entity_type from change_log where batch_id is not null`,
+  )
+  const batches = new Set(log.map((l) => l.batch_id))
+  check(log.length >= 2, `wrote ${log.length} per-entity audit rows`)
+  check(batches.size >= 1, 'grouped under a batch id')
+  check(
+    log.every((l) => l.action === 'create' || l.action === 'update'),
+    'with real actions rather than an opaque "import"',
+  )
+}
+
+for (const suffix of ['', '-wal', '-shm']) {
+  rmSync(resolve(`${DB_PATH}${suffix}`), { force: true })
+}
+
+console.log(failures === 0 ? '\nAll CSV import checks passed.\n' : `\n${failures} failed.\n`)
+process.exit(failures === 0 ? 0 : 1)

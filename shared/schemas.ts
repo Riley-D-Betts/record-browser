@@ -25,8 +25,8 @@ const idSchema = z.string().min(1).max(128)
  * Technical names get a deliberately tight grammar. This is the identifier that gets
  * typed into code, so spaces and punctuation are a correctness problem, not a style one.
  */
-const apiNameSchema = z
-  .string()
+export const apiNameSchema = z
+  .string({ error: 'Technical name is required' })
   .min(1, 'Technical name is required')
   .max(128)
   .regex(
@@ -34,7 +34,10 @@ const apiNameSchema = z
     'Must start with a letter or underscore and contain only letters, digits, underscores or dots',
   )
 
-const labelSchema = z.string().min(1, 'Display label is required').max(256)
+const labelSchema = z
+  .string({ error: 'Display label is required' })
+  .min(1, 'Display label is required')
+  .max(256)
 const externalIdSchema = z.string().max(256).nullish()
 const descriptionSchema = z.string().max(4000).nullish()
 
@@ -136,13 +139,19 @@ export const fieldSourceSchema = z.discriminatedUnion('sourceKind', [
   z.object({
     sourceKind: z.literal('reference'),
     /** Exactly one upstream field. */
-    sourceFieldId: idSchema,
+    sourceFieldId: z
+      .string({ error: 'Choose the field this one is populated from' })
+      .min(1, 'Choose the field this one is populated from')
+      .max(128),
     sourceNotes: z.string().max(1000).nullish(),
   }),
   z.object({
     sourceKind: z.literal('derived'),
+    // The message is on the type as well as the length check: a *missing* key fails
+    // the type check first, and zod's default ("expected string, received undefined")
+    // is not something to show a person.
     sourceExpression: z
-      .string()
+      .string({ error: 'A derived field needs an expression describing how it is computed' })
       .min(1, 'A derived field needs an expression describing how it is computed')
       .max(4000),
     derivationLanguage: z.enum(DERIVATION_LANGUAGES).nullish(),
