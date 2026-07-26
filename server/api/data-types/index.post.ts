@@ -3,6 +3,7 @@ import { dataTypes, useDb } from '../../db'
 import { dataTypeInputSchema } from '../../../shared/schemas'
 import { recordChange } from '../../utils/audit'
 import { requireEditor } from '../../utils/auth'
+import { assertListValue } from '../../services/lists'
 
 export default defineEventHandler(async (event) => {
   const actor = await requireEditor(event)
@@ -10,6 +11,8 @@ export default defineEventHandler(async (event) => {
   const db = useDb()
 
   return db.transaction((tx) => {
+    assertListValue(tx, 'data_type_category', input.category, 'category')
+
     const clash = tx.select().from(dataTypes).where(eq(dataTypes.key, input.key)).all()[0]
     if (clash) {
       throw createError({

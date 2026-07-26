@@ -3,6 +3,7 @@ import { fields, relationships, useDb } from '../../db'
 import { relationshipInputSchema } from '../../../shared/schemas'
 import { recordChange } from '../../utils/audit'
 import { requireEditor } from '../../utils/auth'
+import { assertListValue } from '../../services/lists'
 
 export default defineEventHandler(async (event) => {
   const actor = await requireEditor(event)
@@ -10,6 +11,8 @@ export default defineEventHandler(async (event) => {
   const db = useDb()
 
   return db.transaction((tx) => {
+    assertListValue(tx, 'delete_behavior', input.onDelete, 'onDelete')
+
     // The linking field has to live on the child — that is what "the child points at
     // the parent" means. SQLite cannot express this as a CHECK across tables.
     if (input.viaFieldId) {

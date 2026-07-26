@@ -40,6 +40,13 @@ duplicated or missing identifiers.
 editable in the UI; viewers get the same views without the controls. A delete that
 would break something else refuses and names what depends on it.
 
+**Settings**, where the dropdowns themselves are editable. Field types, modules,
+derivation languages, delete behaviours and type categories are all lists a team owns
+— your source system's vocabulary is not ours to fix in advance. Adding a field type
+is more than adding a word: ticking its detail boxes makes the field form offer a
+length, a precision/scale pair, or an options list, so a type you add is as usable as
+one that shipped.
+
 **ERD** with real layered layout, module grouping, and collapse — because the answer to
 a 400-node diagram is not a bigger screen.
 
@@ -68,7 +75,8 @@ finds nothing.
 | | |
 |---|---|
 | `pnpm dev` | Run it |
-| `pnpm test` | Unit tests (lineage traversal, import planning, search escaping, form validation) |
+| `pnpm test` | Unit tests (lineage traversal, import planning, search escaping, form validation, list registry) |
+| `pnpm typecheck` | Type-check every context (app, server, shared) |
 | `pnpm db:generate` | Generate a migration after changing the schema |
 | `pnpm db:migrate` / `db:seed` / `db:reset` | Database lifecycle |
 | `pnpm user:create` | Add an account |
@@ -171,6 +179,26 @@ whose technical name differs, the source system renamed something — which is p
 the kind of thing a catalog exists to notice. It is surfaced as a per-row opt-in and
 reported even when declined.
 
+**A PATCH changes only what it names.** The patch schemas were
+`inputSchema.partial()`, which makes a key optional but keeps its default — so zod
+filled the default in for absent keys and the handler wrote it over the stored value.
+`PATCH { label }` on a field therefore reset its origin, all four flags and its sort
+order, and reset provenance to `user_entry`, which takes the field's dependency rows
+with it. The forms all send complete bodies, so nothing surfaced it. `patchSchemaOf`
+strips the defaults, and the tests name each column that used to be clobbered.
+
+**Editable lists are one table, and only for the lists that are lists.** Derivation
+languages, delete behaviours and type categories are labels the source system chose,
+so they live in `list_items` and are edited in Settings. Native/custom, source kinds,
+cardinality and roles are not lists — they are the model wearing a dropdown, and code
+branches on each member by name. Settings shows those too, with the reason each is
+closed, because "not editable" with no explanation just sends someone looking.
+
+**Retiring a list value hides it, never rewrites history.** Rows store a member's key,
+so deleting one in use would leave values no list explains. Deletion is refused with a
+count and points at hiding instead; a hidden member cannot be newly chosen but every
+row already holding it is untouched, and still renders with its label.
+
 **Search is literal.** SQL `LIKE` gives `_` and `%` wildcard meaning, and technical
 names are mostly underscores — `Sales_Order` would otherwise match `SalesXOrder`. Terms
 are escaped, with an explicit `ESCAPE` clause.
@@ -197,12 +225,13 @@ these were a first-class source kind, that is a schema change worth making expli
 app/            pages, components, composables   (Nuxt 4 client)
   components/erd/    the SVG canvas
   components/form/   record, field, relationship and delete dialogs
+  components/settings/  field type, module and list editors
 server/
   api/          route handlers
   db/           Drizzle schema + migrations
-  services/     lineage, provenance, reports, deletion, interchange
+  services/     lineage, provenance, reports, deletion, interchange, lists
   lib/          password hashing, literal search   (not auto-imported — see below)
-shared/         constants and zod schemas used by BOTH client and server
+shared/         constants, zod schemas and the list registry, used by BOTH sides
 scripts/        migrate, seed, create-user, constraint smoke test
 ```
 

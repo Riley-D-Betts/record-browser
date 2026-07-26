@@ -3,6 +3,7 @@ import { fieldDependencies, fields } from '../db/schema'
 import type { FieldSourceInput } from '../../shared/schemas'
 import { traverse } from './lineage'
 import type { DependencyEdge } from './lineage'
+import { assertListValue } from './lists'
 
 /**
  * The single writer of field provenance.
@@ -127,6 +128,12 @@ export function setFieldSource(
   }
 
   // derived
+  //
+  // The language is checked here rather than in the route because this is the single
+  // writer of provenance — putting it anywhere else would leave the import committer
+  // and the seed free to write a language no list offers.
+  assertListValue(tx, 'derivation_language', source.derivationLanguage, 'derivationLanguage')
+
   const dependsOn = [...new Set(source.dependsOn ?? [])].filter((id) => id !== fieldId)
   if (dependsOn.length > 0) {
     assertFieldsExist(tx, dependsOn)

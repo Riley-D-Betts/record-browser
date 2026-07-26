@@ -3,6 +3,7 @@ import { fields, relationships, useDb } from '../../db'
 import { relationshipPatchSchema } from '../../../shared/schemas'
 import { recordChange } from '../../utils/audit'
 import { requireEditor } from '../../utils/auth'
+import { assertListValue } from '../../services/lists'
 
 export default defineEventHandler(async (event) => {
   const actor = await requireEditor(event)
@@ -11,6 +12,8 @@ export default defineEventHandler(async (event) => {
   const db = useDb()
 
   return db.transaction((tx) => {
+    assertListValue(tx, 'delete_behavior', patch.onDelete, 'onDelete')
+
     const before = tx.select().from(relationships).where(eq(relationships.id, id)).all()[0]
     if (!before) {
       throw createError({ statusCode: 404, statusMessage: 'No such relationship' })

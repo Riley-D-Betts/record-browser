@@ -46,7 +46,11 @@ export type DependencyKind = (typeof DEPENDENCY_KINDS)[number]
 
 /**
  * How a derived field is computed. Metadata only — we never parse these.
- * Platform-agnostic, so the list is a hint for readers rather than a contract.
+ *
+ * Seed values, not the runtime list: these are inserted into `list_items` on first
+ * migrate and edited in Settings from then on. See shared/lists.ts. The same is true
+ * of DELETE_BEHAVIORS and DATA_TYPE_CATEGORIES below — which is why the columns
+ * holding them are plain text rather than typed enums.
  */
 export const DERIVATION_LANGUAGES = [
   'formula',
@@ -98,6 +102,7 @@ export const ENTITY_TYPES = [
   'field',
   'relationship',
   'data_type',
+  'list_item',
 ] as const
 export type EntityType = (typeof ENTITY_TYPES)[number]
 

@@ -9,6 +9,7 @@ const nav = [
   { to: '/lineage', label: 'Lineage', icon: 'i-lucide-git-branch' },
   { to: '/reports', label: 'Reports', icon: 'i-lucide-shield-alert' },
   { to: '/transfer', label: 'Import / export', icon: 'i-lucide-arrow-down-up' },
+  { to: '/settings', label: 'Settings', icon: 'i-lucide-settings' },
 ]
 
 const isActive = (to: string) =>

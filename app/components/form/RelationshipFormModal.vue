@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CARDINALITIES, CARDINALITY_LABELS, DELETE_BEHAVIORS } from '#shared/constants'
+import { CARDINALITIES, CARDINALITY_LABELS } from '#shared/constants'
 import type { RecordDetailResponse } from '~~/server/api/records/[id].get'
 
 /**
@@ -29,7 +29,7 @@ const blank = () => ({
   viaFieldId: NO_FIELD,
   cardinality: 'one_to_many' as (typeof CARDINALITIES)[number],
   isIdentifying: false,
-  onDelete: 'none' as (typeof DELETE_BEHAVIORS)[number],
+  onDelete: 'none',
   label: '',
   description: '',
 })
@@ -93,10 +93,10 @@ const cardinalityOptions = CARDINALITIES.map((c) => ({
   label: `${CARDINALITY_LABELS[c]} — ${c.replace(/_/g, ' ')}`,
   value: c,
 }))
-const deleteOptions = DELETE_BEHAVIORS.map((d) => ({
-  label: { cascade: 'Cascade', restrict: 'Restrict', set_null: 'Set null', none: 'Not specified' }[d],
-  value: d,
-}))
+// Editable in Settings: this records what the *source* system does, and its
+// vocabulary is not necessarily SQL's four.
+const { options } = useLists()
+const deleteOptions = computed(() => options('delete_behavior'))
 
 async function submit() {
   saving.value = true

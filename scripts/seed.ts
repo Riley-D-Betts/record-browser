@@ -12,10 +12,16 @@ import { eq } from 'drizzle-orm'
 import { createDb, dataTypes, fieldDependencies, fields, modules, records, relationships, users } from '../server/db'
 import { setFieldSource } from '../server/services/fieldSource'
 import { hashPassword } from '../server/lib/password'
+import { ensureBuiltinLists } from '../server/services/lists'
 import { BUILTIN_DATA_TYPES } from '../shared/constants'
 
 const db = createDb(process.env.NUXT_DATABASE_PATH ?? '.data/record-browser.db')
 const withDemo = !process.argv.includes('--no-demo')
+
+// --- editable lists ---------------------------------------------------------
+
+// Also run by db:migrate; repeated here so `db:seed` alone leaves a usable install.
+console.log(`Editable lists: ${ensureBuiltinLists(db)} built-in values added`)
 
 // --- type catalog -----------------------------------------------------------
 

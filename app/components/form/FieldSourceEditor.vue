@@ -1,7 +1,5 @@
 <script setup lang="ts">
 import {
-  DERIVATION_LANGUAGES,
-  DERIVATION_LANGUAGE_LABELS,
   SOURCE_KINDS,
   SOURCE_KIND_DESCRIPTIONS,
   SOURCE_KIND_LABELS,
@@ -65,19 +63,19 @@ function removeDependency(id: string) {
   model.value.dependsOn = model.value.dependsOn.filter((d) => d !== id)
 }
 
-const languageOptions = [
-  { label: 'Not specified', value: 'unspecified' },
-  ...DERIVATION_LANGUAGES.map((l) => ({ label: DERIVATION_LANGUAGE_LABELS[l], value: l })),
-]
+// Editable in Settings — a team's expressions are written in whatever its system
+// uses, which is not something this app can enumerate up front.
+const { options } = useLists()
+const languageOptions = computed(() => options('derivation_language', 'Not specified'))
 
 const language = computed({
   get: () =>
     model.value.sourceKind === 'derived'
-      ? (model.value.derivationLanguage ?? 'unspecified')
-      : 'unspecified',
+      ? (model.value.derivationLanguage ?? UNSPECIFIED)
+      : UNSPECIFIED,
   set: (value: string) => {
     if (model.value.sourceKind === 'derived') {
-      model.value.derivationLanguage = value === 'unspecified' ? null : (value as never)
+      model.value.derivationLanguage = value === UNSPECIFIED ? null : value
     }
   },
 })
