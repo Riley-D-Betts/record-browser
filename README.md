@@ -101,6 +101,20 @@ Nothing is written until you have seen exactly what would change: the preview na
 columns that would be touched and how many rows each affects, so *"description: 412,
 label: 3"* tells you at a glance whether the import is doing what you meant.
 
+### Getting a CSV out of NetSuite
+
+`netsuite/` holds a SuiteScript exporter that produces one directly — record types,
+their fields, the types, and which records point at which. Plain SuiteScript 2.1, no
+build step, and it needs no network path out of NetSuite if you would rather download
+the file and upload it by hand.
+
+It is a Map/Reduce with a thin Suitelet in front, because a Suitelet's 1,000 usage
+units cannot enumerate ~200 record types (that costs about 1,250 before a single custom
+record). Its tests run the deployed files through an AMD shim and finish by importing
+the generated CSV into a real catalog database, so the two halves cannot drift. See
+[`netsuite/README.md`](netsuite/README.md) — including what it deliberately does not
+promise.
+
 ### JSON
 
 The catalog also round-trips through one JSON format, used by both directions.
@@ -233,6 +247,7 @@ server/
   lib/          password hashing, literal search   (not auto-imported — see below)
 shared/         constants, zod schemas and the list registry, used by BOTH sides
 scripts/        migrate, seed, create-user, constraint smoke test
+netsuite/       SuiteScript exporter that produces an importable CSV
 ```
 
 `server/lib/password.ts` sits outside `server/utils/` deliberately: Nitro auto-imports
@@ -241,6 +256,10 @@ won that race would decide the hash format, and a flip would invalidate every st
 password.
 
 ## Not built yet
+
+**Provenance from NetSuite formula fields.** They would map well onto `derived`, but
+CSV import excludes `source_kind` by design — it has to go through `setFieldSource` to
+keep dependency rows consistent. Set it in the catalog after importing.
 
 **XLSX import** — CSV only for now. npm's `xlsx` is frozen at 0.18.5 with two unpatched
 high-severity advisories since SheetJS moved distribution off npm, so if this is wanted
