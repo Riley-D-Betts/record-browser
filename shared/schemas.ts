@@ -1,15 +1,13 @@
 import { z } from 'zod'
 import {
   CARDINALITIES,
-  DATA_TYPE_CATEGORIES,
-  DELETE_BEHAVIORS,
   DEPENDENCY_KINDS,
-  DERIVATION_LANGUAGES,
   MAX_LINEAGE_DEPTH,
   ORIGINS,
   SOURCE_KINDS,
   USER_ROLES,
 } from './constants'
+import { listValueSchema } from './lists'
 
 /**
  * Validation contracts shared by Nitro handlers and Vue forms.
@@ -43,6 +41,38 @@ const descriptionSchema = z.string().max(4000).nullish()
 
 const originSchema = z.enum(ORIGINS)
 
+/**
+ * A PATCH schema: every key optional, and — the point of this helper — every default
+ * stripped.
+ *
+ * `.partial()` alone is not enough. It makes a key optional but leaves its default
+ * intact, so zod fills the default in when the key is absent and the handler writes
+ * that over the stored value. `PATCH { label }` on a field therefore reset its origin,
+ * all four flags and its sort order, and reset provenance to `user_entry` — which
+ * deletes the field's dependency rows. The forms all send complete bodies, so it never
+ * showed there; anything else calling the API silently lost data.
+ *
+ * The rule this restores is the same one the CSV planner already follows: a key the
+ * request does not carry can never change anything.
+ */
+type Undefault<T> = T extends z.ZodDefault<infer Inner> ? Inner : T
+
+type PatchShape<T extends z.ZodRawShape> = {
+  [K in keyof T]: z.ZodOptional<Undefault<T[K]> extends z.ZodType ? Undefault<T[K]> : never>
+}
+
+function patchSchemaOf<T extends z.ZodRawShape>(
+  schema: z.ZodObject<T>,
+): z.ZodObject<PatchShape<T>> {
+  const shape: Record<string, z.ZodType> = {}
+  for (const [key, value] of Object.entries(schema.shape)) {
+    let inner = value as z.ZodType
+    while (inner instanceof z.ZodDefault) inner = inner.def.innerType as z.ZodType
+    shape[key] = inner.optional()
+  }
+  return z.object(shape) as unknown as z.ZodObject<PatchShape<T>>
+}
+
 // ---------------------------------------------------------------------------
 // Modules
 // ---------------------------------------------------------------------------
@@ -74,7 +104,13 @@ export const dataTypeInputSchema = z.object({
     .max(64)
     .regex(/^[a-z0-9_]+$/, 'Lowercase letters, digits and underscores only'),
   label: z.string().min(1).max(128),
-  category: z.enum(DATA_TYPE_CATEGORIES).default('other'),
+  /**
+   * Categories are an editable list, so membership cannot be checked here — this
+   * schema is shared with the browser, which has no list to check against. The shape
+   * is validated here and membership by `assertListValue` on the server, which is the
+   * only place that knows what the list currently holds.
+   */
+  category: listValueSchema.default('other'),
   description: descriptionSchema,
   /** Drive which detail inputs the field form renders for this type. */
   supportsLength: z.boolean().default(false),
@@ -84,6 +120,8 @@ export const dataTypeInputSchema = z.object({
   sortOrder: z.number().int().default(0),
 })
 export type DataTypeInput = z.infer<typeof dataTypeInputSchema>
+
+export const dataTypePatchSchema = patchSchemaOf(dataTypeInputSchema)
 
 // ---------------------------------------------------------------------------
 // Records
@@ -100,7 +138,7 @@ export const recordInputSchema = z.object({
 })
 export type RecordInput = z.infer<typeof recordInputSchema>
 
-export const recordPatchSchema = recordInputSchema.partial()
+export const recordPatchSchema = patchSchemaOf(recordInputSchema)
 
 export const recordQuerySchema = z.object({
   q: z.string().max(256).optional(),
@@ -154,7 +192,8 @@ export const fieldSourceSchema = z.discriminatedUnion('sourceKind', [
       .string({ error: 'A derived field needs an expression describing how it is computed' })
       .min(1, 'A derived field needs an expression describing how it is computed')
       .max(4000),
-    derivationLanguage: z.enum(DERIVATION_LANGUAGES).nullish(),
+    /** An editable list — see the note on `category` above. */
+    derivationLanguage: listValueSchema.nullish(),
     /** Recorded explicitly — we cannot parse every system's expression grammar. */
     dependsOn: z.array(idSchema).default([]),
     sourceNotes: z.string().max(1000).nullish(),
@@ -170,7 +209,12 @@ export const fieldInputSchema = z.object({
   dataTypeId: idSchema.nullish(),
   typeDetail: z.record(z.string(), z.unknown()).nullish(),
   origin: originSchema.default('custom'),
-  source: fieldSourceSchema.default({ sourceKind: 'user_entry' }),
+  // Spelled out rather than `{ sourceKind: 'user_entry' }`: zod applies a default as
+  // the parsed *output*, so it never picks up the branch's own inner defaults.
+  source: fieldSourceSchema.default({
+    sourceKind: 'user_entry',
+    isExternallyPopulated: false,
+  }),
   isRequired: z.boolean().default(false),
   isUnique: z.boolean().default(false),
   isPrimaryKey: z.boolean().default(false),
@@ -180,7 +224,7 @@ export const fieldInputSchema = z.object({
 })
 export type FieldInput = z.infer<typeof fieldInputSchema>
 
-export const fieldPatchSchema = fieldInputSchema.partial().omit({ recordId: true })
+export const fieldPatchSchema = patchSchemaOf(fieldInputSchema).omit({ recordId: true })
 
 export const fieldQuerySchema = z.object({
   q: z.string().max(256).optional(),
@@ -208,7 +252,8 @@ export const relationshipInputSchema = z
     viaFieldId: idSchema.nullish(),
     cardinality: z.enum(CARDINALITIES).default('one_to_many'),
     isIdentifying: z.boolean().default(false),
-    onDelete: z.enum(DELETE_BEHAVIORS).default('none'),
+    /** An editable list — see the note on `category` above. */
+    onDelete: listValueSchema.default('none'),
     label: z.string().max(256).nullish(),
     description: descriptionSchema,
   })
@@ -226,7 +271,7 @@ export const relationshipPatchSchema = z.object({
   viaFieldId: idSchema.nullish(),
   cardinality: z.enum(CARDINALITIES).optional(),
   isIdentifying: z.boolean().optional(),
-  onDelete: z.enum(DELETE_BEHAVIORS).optional(),
+  onDelete: listValueSchema.optional(),
   label: z.string().max(256).nullish(),
   description: descriptionSchema,
 })

@@ -2,6 +2,7 @@
 import gsap from 'gsap'
 import { Flip } from 'gsap/Flip'
 import { CARDINALITY_LABELS } from '#shared/constants'
+import type { Cardinality } from '#shared/constants'
 
 /**
  * The ERD canvas.
@@ -356,7 +357,7 @@ const edgeMidpoint = (id: string) => {
               fill="var(--ui-text-dimmed)"
               class="text-[9px]"
             >
-              {{ CARDINALITY_LABELS[edge.cardinality] ?? '' }}
+              {{ CARDINALITY_LABELS[edge.cardinality as Cardinality] ?? '' }}
             </text>
           </g>
         </g>

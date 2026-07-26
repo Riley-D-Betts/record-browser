@@ -27,9 +27,25 @@ const { data: graph, status } = await useFetch('/api/graph', { query })
 const canvas = ref<any>(null)
 const selectedId = ref<string | null>(null)
 
-const selectedNode = computed(() =>
-  (graph.value?.nodes ?? []).find((n: any) => n.id === selectedId.value),
-)
+/**
+ * The payload's two shapes are told apart by `graph.collapsed`, which sits beside the
+ * node array rather than on the nodes themselves — so selecting a node cannot narrow
+ * it. These do the narrowing once, here, instead of asserting it at each use.
+ */
+const selectedRecord = computed(() => {
+  const g = graph.value
+  if (!g || g.collapsed) return undefined
+  return g.nodes.find((n) => n.id === selectedId.value)
+})
+
+const selectedModule = computed(() => {
+  const g = graph.value
+  if (!g || !g.collapsed) return undefined
+  return g.nodes.find((n) => n.id === selectedId.value)
+})
+
+/** Only the identity all nodes share — enough for the panel heading. */
+const selectedNode = computed(() => selectedRecord.value ?? selectedModule.value)
 
 /** Selecting a record dims everything it is not connected to. */
 const highlightRecordIds = computed(() => {
@@ -155,12 +171,12 @@ const TOO_MANY = 400
           />
         </div>
 
-        <template v-if="!graph?.collapsed">
-          <div class="identifier mt-1 text-xs text-muted">{{ selectedNode.apiName }}</div>
+        <template v-if="selectedRecord">
+          <div class="identifier mt-1 text-xs text-muted">{{ selectedRecord.apiName }}</div>
           <div class="mt-3 flex flex-wrap gap-1.5">
-            <OriginBadge :origin="selectedNode.origin" />
+            <OriginBadge :origin="selectedRecord.origin" />
             <UBadge
-              :label="`${selectedNode.fieldCount} fields`"
+              :label="`${selectedRecord.fieldCount} fields`"
               color="neutral"
               variant="subtle"
               size="sm"
@@ -172,12 +188,12 @@ const TOO_MANY = 400
             variant="subtle"
             icon="i-lucide-arrow-right"
             label="Open record"
-            @click="router.push(`/records/${selectedNode.id}`)"
+            @click="router.push(`/records/${selectedRecord.id}`)"
           />
         </template>
-        <template v-else>
+        <template v-else-if="selectedModule">
           <p class="mt-2 text-sm text-muted">
-            {{ selectedNode.recordCount }} records in this module.
+            {{ selectedModule.recordCount }} records in this module.
           </p>
           <UButton
             class="mt-4"
@@ -186,7 +202,7 @@ const TOO_MANY = 400
             label="Expand this module"
             @click="
               () => {
-                selectedModules = [selectedNode.id]
+                selectedModules = [selectedModule!.id]
                 collapseModules = false
                 selectedId = null
               }

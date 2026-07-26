@@ -1,0 +1,10 @@
+{
+  "//": "Nuxt 4 generates one tsconfig per context (app, server, shared, node) because they have genuinely different globals and auto-imports. This root file only wires them together as project references so `nuxt typecheck` has an entry point — without it the CLI cannot find a tsconfig and the script fails before checking anything.",
+  "files": [],
+  "references": [
+    { "path": "./.nuxt/tsconfig.app.json" },
+    { "path": "./.nuxt/tsconfig.server.json" },
+    { "path": "./.nuxt/tsconfig.shared.json" },
+    { "path": "./.nuxt/tsconfig.node.json" }
+  ]
+}

@@ -9,7 +9,7 @@ import { rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { eq, sql } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
-import { createDb, dataTypes, fields, modules, records } from '../server/db'
+import { createDb, dataTypes, fields, modules, records, relationships } from '../server/db'
 import { applyCsvImport, planCsvImport } from '../server/services/csvImport'
 import type { Strategy } from '../shared/csvColumns'
 
@@ -245,9 +245,11 @@ console.log('\nBad values')
     [row({ Object: 'Account', Field: 'Weird', Required: 'perhaps' })],
     'fill-blanks',
   )
+  // Deliberately changed: this used to be a hard error that aborted the whole import.
   check(
-    planned.preview.errors.some((e) => e.code === 'UNKNOWN_ENUM'),
-    'an unreadable yes/no value is reported',
+    planned.preview.errors.length === 0 &&
+      planned.preview.columnWarnings.some((w) => w.column === 'field_required'),
+    'an unreadable yes/no value warns instead of aborting',
   )
 }
 {
@@ -290,6 +292,107 @@ console.log('\nAudit')
     log.every((l) => l.action === 'create' || l.action === 'update'),
     'with real actions rather than an opaque "import"',
   )
+}
+
+// --- 9. tolerance: odd values warn, they do not abort ------------------------
+
+console.log('\nTolerance')
+{
+  const { planned } = run(
+    [
+      row({ Object: 'Account', Field: 'Flagged', Required: 'T' }),
+      row({ Object: 'Account', Field: 'Unflagged', Required: 'F' }),
+      row({ Object: 'Account', Field: 'Unknowable', Required: 'Conditionally required' }),
+      row({ Object: 'Account', Field: 'NotApplicable', Required: 'N/A' }),
+    ],
+    'fill-blanks',
+  )
+  check(planned.preview.errors.length === 0, 'an unreadable value no longer aborts the import')
+  check(
+    planned.preview.counts.fields.create === 4,
+    'every row still imports, including the one with the odd cell',
+  )
+  check(
+    planned.preview.columnWarnings.some((w) => w.column === 'field_required'),
+    'the unreadable cell is reported as a per-column warning',
+  )
+
+  planned.recordPlans.length = 0
+  const applied = run(
+    [
+      row({ Object: 'Account', Field: 'Flagged', Required: 'T' }),
+      row({ Object: 'Account', Field: 'Unflagged', Required: 'F' }),
+      row({ Object: 'Account', Field: 'NotApplicable', Required: 'N/A' }),
+    ],
+    'fill-blanks',
+  )
+  applied.apply()
+  const byName = (n: string) => db.select().from(fields).all().find((f) => f.apiName === n)
+  check(byName('Flagged')?.isRequired === true, 'T read as true')
+  check(byName('Unflagged')?.isRequired === false, 'F read as false')
+  check(byName('NotApplicable')?.isRequired === false, 'N/A left at the default, not asserted')
+}
+
+// --- 10. relationships derived from a reference target -----------------------
+
+console.log('\nRelationships')
+{
+  const REL_MAPPING = {
+    record_api_name: 'Object',
+    field_api_name: 'Field',
+    field_type: 'Type',
+    field_reference_target: 'Refers To',
+  }
+  const relRow = (o: Record<string, string>) => ({
+    Object: '', Field: '', Type: '', 'Refers To': '', ...o,
+  })
+
+  const { planned, apply } = run(
+    [
+      relRow({ Object: 'Sales_Order', Field: 'Id', Type: 'Text' }),
+      relRow({ Object: 'Sales_Line', Field: 'Order_Id', Type: 'Reference', 'Refers To': 'Sales_Order' }),
+    ],
+    'fill-blanks',
+    { mapping: REL_MAPPING },
+  )
+  check(planned.preview.errors.length === 0, 'no errors')
+  check(planned.preview.counts.relationships.create === 1, 'one relationship planned')
+
+  const applied = apply()
+  check(applied.relationshipsCreated === 1, 'one relationship created')
+
+  const rel = db.select().from(relationships).all().slice(-1)[0]!
+  const parent = db.select().from(records).all().find((r) => r.id === rel.parentRecordId)
+  const child = db.select().from(records).all().find((r) => r.id === rel.childRecordId)
+  const via = db.select().from(fields).all().find((f) => f.id === rel.viaFieldId)
+  check(parent?.apiName === 'Sales_Order', 'parent is the target record')
+  check(child?.apiName === 'Sales_Line', 'child is the record owning the field')
+  check(via?.apiName === 'Order_Id', 'the linking field is the one that pointed')
+  check(rel.cardinality === 'many_to_one', 'a single reference is many-to-one')
+
+  // Re-importing must not duplicate it.
+  const again = run(
+    [
+      relRow({ Object: 'Sales_Order', Field: 'Id', Type: 'Text' }),
+      relRow({ Object: 'Sales_Line', Field: 'Order_Id', Type: 'Reference', 'Refers To': 'Sales_Order' }),
+    ],
+    'fill-blanks',
+    { mapping: REL_MAPPING },
+  )
+  check(again.planned.preview.counts.relationships.create === 0, 're-import creates no duplicate')
+
+  // A target that does not exist warns; the field still imports.
+  const dangling = run(
+    [relRow({ Object: 'Sales_Line', Field: 'Ghost_Id', Type: 'Reference', 'Refers To': 'Nowhere_At_All' })],
+    'fill-blanks',
+    { mapping: REL_MAPPING },
+  )
+  check(dangling.planned.preview.errors.length === 0, 'a dangling target does not abort')
+  check(
+    dangling.planned.preview.warnings.some((w) => w.includes('Nowhere_At_All')),
+    'a dangling target is reported',
+  )
+  check(dangling.planned.preview.counts.fields.create === 1, 'and the field still imports')
 }
 
 for (const suffix of ['', '-wal', '-shm']) {

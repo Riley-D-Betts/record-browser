@@ -52,8 +52,8 @@ export interface ColumnDef {
   label: string
   help?: string
   blankness: Blankness
-  /** Coerces a trimmed cell into the stored representation. */
-  coerce?: (raw: string) => { ok: true; value: unknown } | { ok: false; message: string }
+  /** Coerces a trimmed cell into a value, a recognised blank, or a readable failure. */
+  coerce?: (raw: string) => CoercionResult
   /** Headers that map here without the user having to say so. */
   aliases: readonly string[]
 }
@@ -62,17 +62,52 @@ export interface ColumnDef {
 // Coercion
 // ---------------------------------------------------------------------------
 
-const TRUE_WORDS = new Set(['true', 'yes', 'y', '1', 'x', '✓', 'checked', 'required'])
-const FALSE_WORDS = new Set(['false', 'no', 'n', '0', '-', '—'])
+/**
+ * A cell resolves to one of three things, not two.
+ *
+ * "No data" is its own answer. Conflating it with a *value* invents facts, and
+ * conflating it with a *failure* discards a whole import over an `N/A`.
+ */
+export type CoercionResult =
+  | { kind: 'value'; value: unknown }
+  | { kind: 'blank' }
+  | { kind: 'unreadable'; message: string }
 
-export function coerceBoolean(raw: string) {
+const value = (v: unknown): CoercionResult => ({ kind: 'value', value: v })
+const blank: CoercionResult = { kind: 'blank' }
+const unreadable = (message: string): CoercionResult => ({ kind: 'unreadable', message })
+
+/**
+ * Deliberately broad. Every one of these is a vocabulary some real exporter emits —
+ * `T`/`F` from NetSuite, Postgres and Salesforce, `on`/`off` from settings screens.
+ * Refusing them buys nothing and costs the user their import.
+ */
+const TRUE_WORDS = new Set([
+  'true', 't', 'yes', 'y', '1', 'x', '✓', 'checked', 'required', 'on', 'enabled',
+])
+const FALSE_WORDS = new Set([
+  'false', 'f', 'no', 'n', '0', 'off', 'disabled', 'unchecked',
+])
+
+/**
+ * Markers meaning "there is nothing here".
+ *
+ * A dash lives here rather than in FALSE_WORDS: in a Required column it means "not
+ * applicable", not a definite no. Recording it as `false` would state something the
+ * spreadsheet never said.
+ */
+const NO_DATA_WORDS = new Set([
+  'n/a', 'na', 'null', 'none', 'nil', '-', '—', '--', '(blank)', '(none)', '?',
+])
+
+export function coerceBoolean(raw: string): CoercionResult {
   const v = raw.trim().toLowerCase()
-  if (TRUE_WORDS.has(v)) return { ok: true as const, value: true }
-  if (FALSE_WORDS.has(v)) return { ok: true as const, value: false }
-  return {
-    ok: false as const,
-    message: `Cannot read "${raw}" as yes or no — use true/false, yes/no, 1/0 or x`,
-  }
+  if (NO_DATA_WORDS.has(v)) return blank
+  if (TRUE_WORDS.has(v)) return value(true)
+  if (FALSE_WORDS.has(v)) return value(false)
+  return unreadable(
+    `Cannot read "${raw}" as yes or no — use true/false, yes/no, y/n, t/f, 1/0 or x`,
+  )
 }
 
 /**
@@ -84,28 +119,35 @@ export function coerceBoolean(raw: string) {
 const NATIVE_WORDS = new Set(['native', 'standard', 'system', 'built-in', 'builtin'])
 const CUSTOM_WORDS = new Set(['custom', 'custom field', 'user', 'user-defined'])
 
-export function coerceOrigin(raw: string) {
+export function coerceOrigin(raw: string): CoercionResult {
   const v = raw.trim().toLowerCase()
-  if (NATIVE_WORDS.has(v)) return { ok: true as const, value: 'native' as Origin }
-  if (CUSTOM_WORDS.has(v)) return { ok: true as const, value: 'custom' as Origin }
+  if (NO_DATA_WORDS.has(v)) return blank
+  if (NATIVE_WORDS.has(v)) return value('native' as Origin)
+  if (CUSTOM_WORDS.has(v)) return value('custom' as Origin)
   // A boolean column headed "Custom?" — true means custom.
-  if (TRUE_WORDS.has(v)) return { ok: true as const, value: 'custom' as Origin }
-  if (FALSE_WORDS.has(v)) return { ok: true as const, value: 'native' as Origin }
-  return {
-    ok: false as const,
-    message: `Cannot read "${raw}" as an origin — use ${ORIGINS.join(' or ')}`,
-  }
+  if (TRUE_WORDS.has(v)) return value('custom' as Origin)
+  if (FALSE_WORDS.has(v)) return value('native' as Origin)
+  return unreadable(`Cannot read "${raw}" as an origin — use ${ORIGINS.join(' or ')}`)
 }
 
-function coerceInteger(raw: string) {
-  const n = Number(raw.trim())
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-    return { ok: false as const, message: `Cannot read "${raw}" as a whole number` }
+function coerceInteger(raw: string): CoercionResult {
+  const trimmed = raw.trim()
+  if (NO_DATA_WORDS.has(trimmed.toLowerCase())) return blank
+  // Tolerate thousands separators and a trailing unit ("255 chars"), which spreadsheets
+  // produce constantly and which carry no ambiguity about the number meant.
+  const cleaned = trimmed.replace(/,/g, '').replace(/\s*[a-z]+\.?$/i, '')
+  const n = Number(cleaned)
+  if (cleaned === '' || !Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+    return unreadable(`Cannot read "${raw}" as a whole number`)
   }
-  return { ok: true as const, value: n }
+  return value(n)
 }
 
-const coerceText = (raw: string) => ({ ok: true as const, value: raw.trim() })
+const coerceText = (raw: string): CoercionResult => {
+  const trimmed = raw.trim()
+  // A literal "null" in a text column is a marker, not somebody's description.
+  return NO_DATA_WORDS.has(trimmed.toLowerCase()) ? blank : value(trimmed)
+}
 
 // ---------------------------------------------------------------------------
 // Columns
@@ -236,6 +278,21 @@ export const COLUMNS: readonly ColumnDef[] = [
     aliases: ['field origin', 'origin', 'custom', 'is custom', 'custom field', 'native or custom'],
   },
   {
+    key: 'field_reference_target',
+    entity: 'field',
+    // Synthetic: this does not write to a field column. It names the record this field
+    // points at, from which the importer derives the whole relationship.
+    target: '__referenceTarget',
+    label: 'Reference target',
+    help: 'The record this field points at. The relationship is derived from it — parent is the target, child is this field\'s record, and this field is the link.',
+    blankness: 'ref',
+    coerce: coerceText,
+    aliases: [
+      'reference target', 'reference', 'references', 'target record', 'related record',
+      'list record', 'record type', 'refers to', 'points to', 'foreign key target',
+    ],
+  },
+  {
     key: 'field_required',
     entity: 'field',
     target: 'isRequired',
@@ -316,13 +373,13 @@ export const COLUMNS: readonly ColumnDef[] = [
     label: 'Allowed values',
     help: 'Semicolon, pipe or newline separated.',
     blankness: 'value',
-    coerce: (raw) => ({
-      ok: true as const,
-      value: raw
+    coerce: (raw) => {
+      const options = raw
         .split(/[;|\n]/)
         .map((o) => o.trim())
-        .filter(Boolean),
-    }),
+        .filter(Boolean)
+      return options.length > 0 ? { kind: 'value', value: options } : { kind: 'blank' }
+    },
     aliases: ['allowed values', 'picklist values', 'options', 'enum values', 'valid values'],
   },
 ] as const

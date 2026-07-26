@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { CARDINALITIES, CARDINALITY_LABELS, DELETE_BEHAVIORS } from '#shared/constants'
+import { CARDINALITIES, CARDINALITY_LABELS } from '#shared/constants'
+import type { RecordDetailResponse } from '~~/server/api/records/[id].get'
 
 /**
  * Create or edit a parent-child relationship.
@@ -28,7 +29,7 @@ const blank = () => ({
   viaFieldId: NO_FIELD,
   cardinality: 'one_to_many' as (typeof CARDINALITIES)[number],
   isIdentifying: false,
-  onDelete: 'none' as (typeof DELETE_BEHAVIORS)[number],
+  onDelete: 'none',
   label: '',
   description: '',
 })
@@ -67,7 +68,7 @@ const recordOptions = computed(() =>
 )
 
 // Only the child's own fields can implement the link.
-const { data: childFields } = await useFetch(
+const { data: childFields } = await useFetch<RecordDetailResponse>(
   () => (form.value.childRecordId ? `/api/records/${form.value.childRecordId}` : ''),
   { immediate: false, watch: [() => form.value.childRecordId] },
 )
@@ -92,10 +93,10 @@ const cardinalityOptions = CARDINALITIES.map((c) => ({
   label: `${CARDINALITY_LABELS[c]} — ${c.replace(/_/g, ' ')}`,
   value: c,
 }))
-const deleteOptions = DELETE_BEHAVIORS.map((d) => ({
-  label: { cascade: 'Cascade', restrict: 'Restrict', set_null: 'Set null', none: 'Not specified' }[d],
-  value: d,
-}))
+// Editable in Settings: this records what the *source* system does, and its
+// vocabulary is not necessarily SQL's four.
+const { options } = useLists()
+const deleteOptions = computed(() => options('delete_behavior'))
 
 async function submit() {
   saving.value = true

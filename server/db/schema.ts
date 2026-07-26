@@ -10,10 +10,7 @@ import {
 import {
   CARDINALITIES,
   CHANGE_ACTIONS,
-  DATA_TYPE_CATEGORIES,
-  DELETE_BEHAVIORS,
   DEPENDENCY_KINDS,
-  DERIVATION_LANGUAGES,
   ENTITY_TYPES,
   ORIGINS,
   SOURCE_KINDS,
@@ -83,6 +80,56 @@ export const modules = sqliteTable(
 )
 
 // ---------------------------------------------------------------------------
+// Editable lists
+// ---------------------------------------------------------------------------
+
+/**
+ * Members of the dropdowns that are lists rather than structure — derivation
+ * languages, delete behaviours, field type categories. See shared/lists.ts for which
+ * lists these are and why the others are not among them.
+ *
+ * One table rather than one per list: they have identical shape and identical
+ * lifecycle, and three near-copies would mean three sets of routes to keep in step.
+ *
+ * Nothing points at these rows by id. A record stores the member's `key` — the same
+ * string the columns held when the list was a TypeScript constant — so adopting this
+ * table changed no existing data, and a list can be edited without rewriting anything
+ * that chose from it.
+ */
+export const listItems = sqliteTable(
+  'list_items',
+  {
+    id: id(),
+    /** Which list this belongs to; one of shared/lists.ts' MANAGED_LISTS. */
+    listKey: text('list_key').notNull(),
+    /** The stored value. Immutable once created — see the note in shared/lists.ts. */
+    key: text('key').notNull(),
+    label: text('label').notNull(),
+    description: text('description'),
+
+    /** Seeded by the app. Cannot be deleted, only hidden. */
+    isBuiltin: integer('is_builtin', { mode: 'boolean' }).notNull().default(false),
+
+    /**
+     * Whether the member is still offered.
+     *
+     * Retiring a value must not rewrite the rows that already chose it — the history
+     * of what used to be true is the point of a catalog. Hiding stops it being picked
+     * from here on and leaves every existing row exactly as it was.
+     */
+    isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('list_items_list_key_unq').on(t.listKey, t.key),
+    index('list_items_list_idx').on(t.listKey),
+  ],
+)
+
+// ---------------------------------------------------------------------------
 // Type catalog — seeded, but user-extensible
 // ---------------------------------------------------------------------------
 
@@ -92,9 +139,11 @@ export const dataTypes = sqliteTable(
     id: id(),
     key: text('key').notNull(),
     label: text('label').notNull(),
-    category: text('category', { enum: DATA_TYPE_CATEGORIES })
-      .notNull()
-      .default('other'),
+    // Not a TS enum any more: the members live in `list_items` under
+    // 'data_type_category' and a team may add its own. Drizzle's `enum` option only
+    // ever narrowed the type — it emitted no constraint — so nothing about the stored
+    // data changes by dropping it.
+    category: text('category').notNull().default('other'),
     description: text('description'),
     /** Seeded types cannot be deleted, only supplemented. */
     isBuiltin: integer('is_builtin', { mode: 'boolean' }).notNull().default(false),
@@ -204,8 +253,8 @@ export const fields = sqliteTable(
       .notNull()
       .default('user_entry'),
     sourceExpression: text('source_expression'),
-    /** How the expression is written. Metadata only — never parsed. */
-    derivationLanguage: text('derivation_language', { enum: DERIVATION_LANGUAGES }),
+    /** How the expression is written. Metadata only — never parsed. Editable list. */
+    derivationLanguage: text('derivation_language'),
 
     /**
      * Escape valve for a real gap in the three source kinds.
@@ -324,7 +373,8 @@ export const relationships = sqliteTable(
     isIdentifying: integer('is_identifying', { mode: 'boolean' })
       .notNull()
       .default(false),
-    onDelete: text('on_delete', { enum: DELETE_BEHAVIORS }).notNull().default('none'),
+    /** What the source system does to children. Descriptive only; editable list. */
+    onDelete: text('on_delete').notNull().default('none'),
 
     label: text('label'),
     description: text('description'),
@@ -379,6 +429,8 @@ export type User = typeof users.$inferSelect
 export type NewUser = typeof users.$inferInsert
 export type Module = typeof modules.$inferSelect
 export type NewModule = typeof modules.$inferInsert
+export type ListItem = typeof listItems.$inferSelect
+export type NewListItem = typeof listItems.$inferInsert
 export type DataType = typeof dataTypes.$inferSelect
 export type NewDataType = typeof dataTypes.$inferInsert
 export type RecordRow = typeof records.$inferSelect
@@ -394,6 +446,7 @@ export type ChangeLogRow = typeof changeLog.$inferSelect
 export const schema = {
   users,
   modules,
+  listItems,
   dataTypes,
   records,
   fields,

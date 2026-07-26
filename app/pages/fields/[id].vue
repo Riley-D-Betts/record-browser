@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import { DERIVATION_LANGUAGE_LABELS, SOURCE_KIND_DESCRIPTIONS } from '#shared/constants'
+import { SOURCE_KIND_DESCRIPTIONS } from '#shared/constants'
 
 const route = useRoute()
+
+// Resolved through the list rather than a constant, so a language added in Settings
+// renders with its label here too — and one that was retired still renders, because a
+// detail page has to show what the row holds, not only what could be chosen today.
+const { label: listLabel } = useLists()
+
 const { data: field, refresh } = await useFetch(`/api/fields/${route.params.id}`)
 
 if (!field.value) {
@@ -134,7 +140,7 @@ const deleting = ref(false)
           <span>Expression</span>
           <UBadge
             v-if="field.derivationLanguage"
-            :label="DERIVATION_LANGUAGE_LABELS[field.derivationLanguage]"
+            :label="listLabel('derivation_language', field.derivationLanguage)"
             color="neutral"
             variant="subtle"
             size="sm"

@@ -71,7 +71,13 @@ export default defineEventHandler(async (event) => {
     }
 
     const applied = applyCsvImport(tx, planned, actor.id, batchId)
-    return { dryRun: false, batchId, ...applied, warnings: planned.preview.warnings }
+    return {
+      dryRun: false,
+      batchId,
+      ...applied,
+      warnings: planned.preview.warnings,
+      columnWarnings: planned.preview.columnWarnings,
+    }
   })
 })
 

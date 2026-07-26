@@ -85,7 +85,10 @@ export default defineEventHandler(async (event) => {
     }
 
     return {
-      collapsed: false,
+      // `as const` so the two payloads form a discriminated union rather than both
+      // widening to `collapsed: boolean` — that is what lets a caller narrow the node
+      // shape from the flag instead of asserting it.
+      collapsed: false as const,
       modules: moduleRows,
       nodes: recordRows.map((r) => ({ ...r, fields: byRecord.get(r.id) ?? [] })),
       edges: relationshipRows,
@@ -139,7 +142,7 @@ export default defineEventHandler(async (event) => {
   }
 
   return {
-    collapsed: true,
+    collapsed: true as const,
     modules: moduleRows,
     nodes,
     edges: [...folded.values()],

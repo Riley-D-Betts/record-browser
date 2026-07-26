@@ -11,7 +11,7 @@ import type { DependencyEdge } from '../../../services/lineage'
  * sub-millisecond read, and it keeps the traversal a pure function that unit tests can
  * cover without a database. See server/services/lineage.ts for the reasoning.
  */
-export default defineEventHandler(async (event) => {
+const handler = defineEventHandler(async (event) => {
   const id = getRouterParam(event, 'id')!
   const q = await getValidatedQuery(event, lineageQuerySchema.parse)
   const db = useDb()
@@ -64,18 +64,33 @@ export default defineEventHandler(async (event) => {
 
   return {
     ...result,
-    nodes: result.nodes.map((node) => ({
-      ...node,
-      ...byId.get(node.fieldId),
-      /**
-       * A true origin: a person types it. A field flagged as externally populated is
-       * NOT one, even though its source kind says user entry — calling it an origin
-       * would hide a whole upstream system from whoever is reading the trace.
-       */
-      isOrigin:
-        node.depth <= 0 &&
-        byId.get(node.fieldId)?.sourceKind === 'user_entry' &&
-        !byId.get(node.fieldId)?.isExternallyPopulated,
-    })),
+    nodes: result.nodes.flatMap((node) => {
+      const detail = byId.get(node.fieldId)
+      // Every reached id is either the root or one end of a dependency edge, and both
+      // are foreign keys into `fields` — so this cannot miss. Dropping rather than
+      // spreading a possible `undefined` keeps that certainty in the type instead of
+      // handing every consumer a node whose every property might be absent.
+      if (!detail) return []
+      return [
+        {
+          ...node,
+          ...detail,
+          /**
+           * A true origin: a person types it. A field flagged as externally populated
+           * is NOT one, even though its source kind says user entry — calling it an
+           * origin would hide a whole upstream system from whoever reads the trace.
+           */
+          isOrigin:
+            node.depth <= 0 &&
+            detail.sourceKind === 'user_entry' &&
+            !detail.isExternallyPopulated,
+        },
+      ]
+    }),
   }
 })
+
+export default handler
+
+/** See the note on FieldDetailResponse — a runtime-built path defeats route inference. */
+export type LineageResponse = Awaited<ReturnType<typeof handler>>
