@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { FieldDetailResponse } from '~~/server/api/fields/[id].get'
+
 /**
  * Choose a field from anywhere in the catalog.
  *
@@ -38,7 +40,7 @@ const visible = computed(() =>
   (results.value?.rows ?? []).filter((row) => !excluded.value.has(row.id)),
 )
 
-const { data: selected } = await useFetch(
+const { data: selected } = await useFetch<FieldDetailResponse>(
   () => (props.modelValue ? `/api/fields/${props.modelValue}` : ''),
   { immediate: Boolean(props.modelValue), watch: [() => props.modelValue] },
 )

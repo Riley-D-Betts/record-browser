@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Papa from 'papaparse'
+import type { BadgeProps } from '@nuxt/ui'
 import {
   COLUMNS,
   STRATEGIES,
@@ -172,6 +173,7 @@ async function commit() {
       result.recordsUpdated && `${result.recordsUpdated} records updated`,
       result.fieldsCreated && `${result.fieldsCreated} fields added`,
       result.fieldsUpdated && `${result.fieldsUpdated} fields updated`,
+      result.relationshipsCreated && `${result.relationshipsCreated} relationships added`,
     ].filter(Boolean)
     toast.add({
       title: 'Import complete',
@@ -195,14 +197,19 @@ const totals = computed(() => {
   if (!preview.value) return null
   const r = preview.value.counts.records
   const f = preview.value.counts.fields
+  const rel = preview.value.counts.relationships ?? { create: 0, update: 0, unchanged: 0, skip: 0, error: 0 }
   return {
-    create: r.create + f.create,
-    update: r.update + f.update,
-    unchanged: r.unchanged + f.unchanged,
-    skip: r.skip + f.skip,
-    error: r.error + f.error,
+    create: r.create + f.create + rel.create,
+    update: r.update + f.update + rel.update,
+    unchanged: r.unchanged + f.unchanged + rel.unchanged,
+    skip: r.skip + f.skip + rel.skip,
+    error: r.error + f.error + rel.error,
   }
 })
+
+const relationshipCount = computed(
+  () => preview.value?.counts?.relationships?.create ?? 0,
+)
 
 const hasWork = computed(
   () => Boolean(totals.value && (totals.value.create > 0 || totals.value.update > 0)),
@@ -214,7 +221,7 @@ const visibleRows = computed(() => {
   return showAllRows.value ? all : interesting
 })
 
-const actionColor: Record<string, string> = {
+const actionColor: Record<string, BadgeProps['color']> = {
   create: 'success',
   update: 'info',
   unchanged: 'neutral',
@@ -397,6 +404,37 @@ const actionColor: Record<string, string> = {
             />
           </div>
         </div>
+
+        <UAlert
+          v-if="preview.columnWarnings?.length"
+          color="warning"
+          variant="subtle"
+          icon="i-lucide-triangle-alert"
+          title="Some values could not be read"
+        >
+          <template #description>
+            <p class="mb-1 text-xs">
+              These cells are skipped and the rows still import. A large count usually
+              means the column means something different from what it was mapped to.
+            </p>
+            <ul class="list-disc space-y-1 pl-4 text-xs">
+              <li v-for="cw in preview.columnWarnings" :key="cw.column">
+                <span class="font-medium">{{ cw.column }}</span>:
+                {{ cw.rows }} value{{ cw.rows === 1 ? '' : 's' }} not understood
+                <span class="text-dimmed">— e.g. “{{ cw.sample }}”</span>
+              </li>
+            </ul>
+          </template>
+        </UAlert>
+
+        <UAlert
+          v-if="relationshipCount > 0"
+          color="info"
+          variant="subtle"
+          icon="i-lucide-git-branch"
+          :title="`${relationshipCount} relationship${relationshipCount === 1 ? '' : 's'} will be created`"
+          description="Derived from the reference-target column: the target is the parent, this row's record is the child, and the field is the link."
+        />
 
         <UAlert
           v-if="preview.warnings.length"

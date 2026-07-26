@@ -3,7 +3,7 @@ import { alias } from 'drizzle-orm/sqlite-core'
 import { dataTypes, fieldDependencies, fields, modules, records, useDb } from '../../db'
 import { findDependents } from '../../services/deletion'
 
-export default defineEventHandler(async (event) => {
+const handler = defineEventHandler(async (event) => {
   const id = getRouterParam(event, 'id')!
   const db = useDb()
 
@@ -69,3 +69,14 @@ export default defineEventHandler(async (event) => {
 
   return { ...field, upstream, downstream: findDependents(db, [id]) }
 })
+
+export default handler
+
+/**
+ * Nuxt infers a `useFetch` result from the literal path, which it cannot do when the
+ * path is built at runtime — those calls silently degrade to `{}` and every property
+ * access on them becomes an error. Exporting the shape lets the caller name it, and
+ * because it is derived from the handler it cannot drift from what is actually sent.
+ */
+export type FieldDetailResponse = Awaited<ReturnType<typeof handler>>
+

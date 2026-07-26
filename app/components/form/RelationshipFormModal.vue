@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { CARDINALITIES, CARDINALITY_LABELS, DELETE_BEHAVIORS } from '#shared/constants'
+import type { RecordDetailResponse } from '~~/server/api/records/[id].get'
 
 /**
  * Create or edit a parent-child relationship.
@@ -67,7 +68,7 @@ const recordOptions = computed(() =>
 )
 
 // Only the child's own fields can implement the link.
-const { data: childFields } = await useFetch(
+const { data: childFields } = await useFetch<RecordDetailResponse>(
   () => (form.value.childRecordId ? `/api/records/${form.value.childRecordId}` : ''),
   { immediate: false, watch: [() => form.value.childRecordId] },
 )

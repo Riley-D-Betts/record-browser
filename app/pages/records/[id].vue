@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { CARDINALITY_LABELS } from '#shared/constants'
+import type { FieldDetailResponse } from '~~/server/api/fields/[id].get'
 
 const route = useRoute()
 const { data: record, refresh } = await useFetch(`/api/records/${route.params.id}`)
@@ -32,7 +33,7 @@ function newField() {
  * Fetch the full field before opening.
  */
 async function editField(id: string) {
-  editingField.value = await $fetch(`/api/fields/${id}`)
+  editingField.value = await $fetch<FieldDetailResponse>(`/api/fields/${id}`)
   fieldModalOpen.value = true
 }
 

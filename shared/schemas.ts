@@ -170,7 +170,12 @@ export const fieldInputSchema = z.object({
   dataTypeId: idSchema.nullish(),
   typeDetail: z.record(z.string(), z.unknown()).nullish(),
   origin: originSchema.default('custom'),
-  source: fieldSourceSchema.default({ sourceKind: 'user_entry' }),
+  // Spelled out rather than `{ sourceKind: 'user_entry' }`: zod applies a default as
+  // the parsed *output*, so it never picks up the branch's own inner defaults.
+  source: fieldSourceSchema.default({
+    sourceKind: 'user_entry',
+    isExternallyPopulated: false,
+  }),
   isRequired: z.boolean().default(false),
   isUnique: z.boolean().default(false),
   isPrimaryKey: z.boolean().default(false),

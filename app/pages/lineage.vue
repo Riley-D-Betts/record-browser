@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { LineageResponse } from '~~/server/api/fields/[id]/lineage.get'
+
 useHead({ title: 'Lineage' })
 
 const route = useRoute()
@@ -13,7 +15,7 @@ const { data: candidates } = await useFetch('/api/fields', {
   query: computed(() => ({ q: debounced.value || undefined, perPage: 20 })),
 })
 
-const { data: lineage, status } = await useFetch(
+const { data: lineage, status } = await useFetch<LineageResponse>(
   () => (fieldId.value ? `/api/fields/${fieldId.value}/lineage` : ''),
   {
     query: computed(() => ({ direction: 'both', depth: depth.value })),

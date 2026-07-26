@@ -10,7 +10,7 @@ import {
   useDb,
 } from '../../db'
 
-export default defineEventHandler(async (event) => {
+const handler = defineEventHandler(async (event) => {
   const id = getRouterParam(event, 'id')!
   const db = useDb()
 
@@ -120,3 +120,8 @@ export default defineEventHandler(async (event) => {
     relationships: recordRelationships,
   }
 })
+
+export default handler
+
+/** See the note on FieldDetailResponse — a runtime-built path defeats route inference. */
+export type RecordDetailResponse = Awaited<ReturnType<typeof handler>>

@@ -1,5 +1,5 @@
-import { eq } from 'drizzle-orm'
-import { dataTypes, fields, modules, records } from '../db/schema'
+import { and, eq } from 'drizzle-orm'
+import { dataTypes, fields, modules, records, relationships } from '../db/schema'
 import { COLUMNS_BY_KEY, blanknessFor, detectShape } from '../../shared/csvColumns'
 import { apiNameSchema } from '../../shared/schemas'
 import { recordChange } from '../utils/audit'
@@ -9,6 +9,7 @@ import {
   planUpsert,
   summariseColumnImpact,
 } from './importPlan'
+import type { Cardinality } from '../../shared/constants'
 import type { Strategy, Tally, UpsertPlan } from './importPlan'
 
 /**
@@ -41,7 +42,7 @@ export interface RowError {
 export interface PreviewRow {
   /** 1-based line in the source file, so a reported problem is findable in it. */
   rowNumber: number
-  entity: 'record' | 'field'
+  entity: 'record' | 'field' | 'relationship'
   key: string
   matchedBy: 'apiName' | 'externalId' | null
   action: UpsertPlan['action']
@@ -63,10 +64,12 @@ export interface ImportPreview {
   strategy: Strategy
   emptyCellsClear: boolean
   shape: 'records' | 'fields'
-  counts: { records: Tally; fields: Tally }
+  counts: { records: Tally; fields: Tally; relationships: Tally }
   columnImpact: Array<{ entity: 'record' | 'field'; column: string; rows: number }>
   renames: RenameNotice[]
   warnings: string[]
+  /** One entry per column that had unreadable values, busiest first. */
+  columnWarnings: Array<{ column: string; rows: number; sample: string; message: string }>
   rows: PreviewRow[]
   truncatedRows: number
   errors: RowError[]
@@ -102,10 +105,20 @@ interface ParsedRow {
   rowNumber: number
   record: Record<string, unknown>
   field: Record<string, unknown>
-  errors: RowError[]
-  /** Raw module / type names, resolved to ids later. */
+  /** Cells we could not read. Warnings, not errors — see parseRows. */
+  cellWarnings: CellWarning[]
+  /** Raw module / type / target names, resolved to ids later. */
   moduleRef?: string
   typeRef?: string
+  referenceTarget?: string
+}
+
+/** A value we could not interpret. The cell is skipped; the row still imports. */
+export interface CellWarning {
+  rowNumber: number
+  column: string
+  raw: string
+  message: string
 }
 
 /**
@@ -122,6 +135,9 @@ function parseRows(input: CsvImportInput): {
   for (const [key] of active) {
     const col = COLUMNS_BY_KEY.get(key)
     if (!col) continue
+    // Synthetic targets drive derived records rather than naming a column on the row,
+    // so the planner must never see them as candidates.
+    if (col.target.startsWith('__')) continue
     // typeDetail.* are assembled separately; the planner sees one `typeDetail` column.
     const target = col.target.startsWith('typeDetail.') ? 'typeDetail' : col.target
     presentTargets[col.entity].add(target)
@@ -129,7 +145,7 @@ function parseRows(input: CsvImportInput): {
 
   const parsed = input.rows.map((raw, index) => {
     const rowNumber = index + 2 // 1-based, plus the header line
-    const out: ParsedRow = { rowNumber, record: {}, field: {}, errors: [] }
+    const out: ParsedRow = { rowNumber, record: {}, field: {}, cellWarnings: [] }
     const detail: Record<string, unknown> = {}
     let sawDetail = false
 
@@ -139,33 +155,54 @@ function parseRows(input: CsvImportInput): {
 
       const cell = (raw[header] ?? '').trim()
       const bucket = col.entity === 'record' ? out.record : out.field
+      const isDetail = col.target.startsWith('typeDetail.')
 
       if (cell === '') {
-        if (!col.target.startsWith('typeDetail.')) bucket[col.target] = EMPTY_CELL
+        if (!isDetail) bucket[col.target] = EMPTY_CELL
         continue
       }
 
-      const coerced = col.coerce ? col.coerce(cell) : { ok: true as const, value: cell }
-      if (!coerced.ok) {
-        out.errors.push({
+      const coerced = col.coerce
+        ? col.coerce(cell)
+        : ({ kind: 'value', value: cell } as const)
+
+      /*
+       * A value we cannot read is a warning, and the cell is treated as blank.
+       *
+       * It used to be a hard error, which aborted the entire import — one odd cell in
+       * row 4,000 discarding twenty thousand good rows. An unrecognised *type* was
+       * already only a warning, so the old severity was not even self-consistent.
+       * Structural problems still abort; see the error codes above.
+       */
+      if (coerced.kind === 'unreadable') {
+        out.cellWarnings.push({
           rowNumber,
-          code: 'UNKNOWN_ENUM',
           column: col.key,
+          raw: cell,
           message: coerced.message,
         })
+        if (!isDetail) bucket[col.target] = EMPTY_CELL
         continue
       }
 
-      if (col.target.startsWith('typeDetail.')) {
+      if (coerced.kind === 'blank') {
+        if (!isDetail) bucket[col.target] = EMPTY_CELL
+        continue
+      }
+
+      if (isDetail) {
         detail[col.target.slice('typeDetail.'.length)] = coerced.value
         sawDetail = true
         continue
       }
 
-      // Module and type arrive as names and are resolved against the catalog below.
+      // Module, type and reference target arrive as names, resolved against the
+      // catalog below rather than written straight onto the row.
       if (col.key === 'record_module') out.moduleRef = String(coerced.value)
       else if (col.key === 'field_type') out.typeRef = String(coerced.value)
-      else bucket[col.target] = coerced.value
+      else if (col.key === 'field_reference_target') {
+        out.referenceTarget = String(coerced.value)
+      } else bucket[col.target] = coerced.value
     }
 
     if (sawDetail) out.field.typeDetail = JSON.stringify(detail)
@@ -188,11 +225,12 @@ export function planCsvImport(db: any, input: CsvImportInput, batchId: string) {
   )
 
   const { parsed, presentTargets } = parseRows(input)
-  const errors: RowError[] = parsed.flatMap((p) => p.errors)
+  const errors: RowError[] = []
+  const cellWarnings: CellWarning[] = parsed.flatMap((p) => p.cellWarnings)
   const warnings: string[] = []
   const renames: RenameNotice[] = []
   const previewRows: PreviewRow[] = []
-  const counts = { records: emptyTally(), fields: emptyTally() }
+  const counts = { records: emptyTally(), fields: emptyTally(), relationships: emptyTally() }
   const impactInput: Array<{ entity: 'record' | 'field'; plan: UpsertPlan }> = []
 
   // --- lookups --------------------------------------------------------------
@@ -384,18 +422,21 @@ export function planCsvImport(db: any, input: CsvImportInput, batchId: string) {
       continue
     }
 
-    // A record row must be able to name the record. Creating needs a label too.
-    if (!existing && !nameOf(incoming, 'label')) {
-      // Fall back to the technical name rather than refusing — a sheet that names a
-      // record but not its label is common, and a label is required by the schema.
-      incoming.label = apiName
-    }
-
+    /*
+     * The label falls back to the technical name, and it goes in `defaults` rather
+     * than on the incoming row.
+     *
+     * The planner only ever copies columns the *file* carries, so writing a fallback
+     * onto `incoming` does nothing when the sheet has no label column at all — and
+     * `records.label` is NOT NULL, so the insert then dies. Defaults are applied on
+     * create and ignored on update, which is exactly the wanted behaviour: fill the
+     * gap for a new record, never rewrite a label somebody chose.
+     */
     const plan = planUpsert(existing, incoming, {
       strategy: input.strategy,
       columns: presentTargets.record,
       blankness: recordBlankness,
-      defaults: RECORD_DEFAULTS,
+      defaults: { ...RECORD_DEFAULTS, label: apiName },
       protectedColumns:
         existing && approvedRenames.has(row.rowNumber) ? new Set() : PROTECTED,
       emptyCellsClear: input.emptyCellsClear,
@@ -545,13 +586,13 @@ export function planCsvImport(db: any, input: CsvImportInput, batchId: string) {
         continue
       }
 
-      if (!existing && !nameOf(incoming, 'label')) incoming.label = fieldApiName
-
+      // Same reasoning as records above: fields.label is NOT NULL, and a sheet with
+      // no field-label column must still be importable.
       const plan = planUpsert(existing, incoming, {
         strategy: input.strategy,
         columns: presentTargets.field,
         blankness: fieldBlankness,
-        defaults: FIELD_DEFAULTS,
+        defaults: { ...FIELD_DEFAULTS, label: fieldApiName },
         protectedColumns:
           existing && approvedRenames.has(row.rowNumber) ? new Set() : PROTECTED,
         emptyCellsClear: input.emptyCellsClear,
@@ -580,6 +621,129 @@ export function planCsvImport(db: any, input: CsvImportInput, batchId: string) {
     }
   }
 
+  /*
+   * --- relationships -------------------------------------------------------
+   *
+   * Derived from the reference-target column rather than stated separately. In a
+   * relational schema the foreign key lives on the child, so a field pointing at a
+   * record tells us the whole relationship: the target is the parent, the field's own
+   * record is the child, and the field itself is the link. Nothing is said twice, so
+   * nothing can disagree with itself.
+   *
+   * Planned last because both endpoints and the linking field must exist first.
+   */
+  const relationshipPlans: Array<{
+    rowNumber: number
+    parentApiName: string
+    childApiName: string
+    fieldApiName: string
+    cardinality: Cardinality
+    existingId: string | null
+  }> = []
+
+  if (shape === 'fields') {
+    const existingRelationships = db
+      .select({
+        id: relationships.id,
+        parentRecordId: relationships.parentRecordId,
+        childRecordId: relationships.childRecordId,
+        viaFieldId: relationships.viaFieldId,
+      })
+      .from(relationships)
+      .all() as Array<Record<string, any>>
+
+    const relationshipByTriple = new Map(
+      existingRelationships.map((r) => [
+        `${r.parentRecordId}>${r.childRecordId}>${r.viaFieldId ?? ''}`,
+        r,
+      ]),
+    )
+
+    const seenInFile = new Set<string>()
+
+    for (const row of parsed) {
+      if (!row.referenceTarget) continue
+
+      const childApiName = nameOf(row.record, 'apiName')
+      const fieldApiName = nameOf(row.field, 'apiName')
+      if (!childApiName || !fieldApiName) continue
+
+      // A target we cannot place is worth recording as a gap, not worth aborting for —
+      // a dangling foreign key is exactly the kind of thing a catalog should surface.
+      if (!resolvedRecordIds.has(row.referenceTarget)) {
+        warnings.push(
+          `Row ${row.rowNumber}: ${childApiName}.${fieldApiName} points at "${row.referenceTarget}", which is not in this file or the catalog — the field imports without its relationship.`,
+        )
+        continue
+      }
+
+      const triple = `${row.referenceTarget}>${childApiName}>${fieldApiName}`
+      if (seenInFile.has(triple)) continue
+      seenInFile.add(triple)
+
+      // A single-select points at one parent; a multi-select at many. Both are
+      // unambiguous. isIdentifying and onDelete are not derivable and keep their
+      // defaults rather than being guessed.
+      const isMulti = String(row.typeRef ?? '')
+        .toLowerCase()
+        .includes('multi')
+      const cardinality: Cardinality = isMulti ? 'many_to_many' : 'many_to_one'
+
+      const parentId = resolvedRecordIds.get(row.referenceTarget) ?? null
+      const childId = resolvedRecordIds.get(childApiName) ?? null
+      const existing =
+        parentId && childId
+          ? (relationshipByTriple.get(`${parentId}>${childId}>`) ??
+            [...relationshipByTriple.values()].find(
+              (r) => r.parentRecordId === parentId && r.childRecordId === childId,
+            ) ??
+            null)
+          : null
+
+      relationshipPlans.push({
+        rowNumber: row.rowNumber,
+        parentApiName: row.referenceTarget,
+        childApiName,
+        fieldApiName,
+        cardinality,
+        existingId: existing?.id ?? null,
+      })
+
+      if (existing) counts.relationships.unchanged++
+      else counts.relationships.create++
+
+      previewRows.push({
+        rowNumber: row.rowNumber,
+        entity: 'relationship',
+        key: `${row.referenceTarget} → ${childApiName}.${fieldApiName}`,
+        matchedBy: existing ? 'apiName' : null,
+        action: existing ? 'unchanged' : 'create',
+        changes: [],
+        suppressed: [],
+      })
+    }
+  }
+
+  /*
+   * Per-column roll-up, because a truncated list of individual warnings is useless
+   * when an entire column failed to parse. "Required: 412 values not understood" is
+   * the signal; the individual rows are the detail.
+   */
+  const warningsByColumn = new Map<string, { count: number; sample: string; message: string }>()
+  for (const w of cellWarnings) {
+    const entry = warningsByColumn.get(w.column)
+    if (entry) entry.count++
+    else warningsByColumn.set(w.column, { count: 1, sample: w.raw, message: w.message })
+  }
+  const columnWarnings = [...warningsByColumn.entries()]
+    .map(([column, v]) => ({
+      column,
+      rows: v.count,
+      sample: v.sample,
+      message: v.message,
+    }))
+    .sort((a, b) => b.rows - a.rows)
+
   const preview: ImportPreview = {
     batchId,
     strategy: input.strategy,
@@ -589,12 +753,13 @@ export function planCsvImport(db: any, input: CsvImportInput, batchId: string) {
     columnImpact: summariseColumnImpact(impactInput),
     renames,
     warnings,
+    columnWarnings,
     rows: previewRows.slice(0, PREVIEW_ROW_CAP),
     truncatedRows: Math.max(0, previewRows.length - PREVIEW_ROW_CAP),
     errors,
   }
 
-  return { preview, recordPlans, fieldPlans, resolvedRecordIds }
+  return { preview, recordPlans, fieldPlans, relationshipPlans, resolvedRecordIds }
 }
 
 /**
@@ -609,7 +774,13 @@ export function applyCsvImport(
   batchId: string,
 ) {
   const ctx = { userId: actorId, batchId }
-  const applied = { recordsCreated: 0, recordsUpdated: 0, fieldsCreated: 0, fieldsUpdated: 0 }
+  const applied = {
+    recordsCreated: 0,
+    recordsUpdated: 0,
+    fieldsCreated: 0,
+    fieldsUpdated: 0,
+    relationshipsCreated: 0,
+  }
   const recordIds = new Map(planned.resolvedRecordIds)
 
   for (const { apiName, plan, existing } of planned.recordPlans) {
@@ -677,6 +848,42 @@ export function applyCsvImport(
         after,
       })
     }
+  }
+
+  for (const rel of planned.relationshipPlans) {
+    if (rel.existingId) continue
+    const parentRecordId = recordIds.get(rel.parentApiName)
+    const childRecordId = recordIds.get(rel.childApiName)
+    if (!parentRecordId || !childRecordId) continue
+
+    // The linking field must be looked up after the field pass, since it may have been
+    // created moments ago by this same import.
+    const via = tx
+      .select({ id: fields.id })
+      .from(fields)
+      .where(and(eq(fields.recordId, childRecordId), eq(fields.apiName, rel.fieldApiName)))
+      .all()[0]
+
+    const created = tx
+      .insert(relationships)
+      .values({
+        parentRecordId,
+        childRecordId,
+        viaFieldId: via?.id ?? null,
+        cardinality: rel.cardinality,
+        createdBy: actorId,
+        updatedBy: actorId,
+      })
+      .returning()
+      .all()[0]
+
+    applied.relationshipsCreated++
+    recordChange(tx, ctx, {
+      entityType: 'relationship',
+      entityId: created.id,
+      action: 'create',
+      after: created,
+    })
   }
 
   return applied
