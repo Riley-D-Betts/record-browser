@@ -31,6 +31,7 @@ const ACCOUNT = {
     { id: 'email', label: 'Email', type: 'email' },
     { id: 'isinactive', label: 'Inactive', type: 'checkbox' },
     { id: 'datecreated', label: 'Date Created', type: 'datetimetz' },
+    { id: 'custentity_loyalty_tier', label: 'Loyalty Tier', type: 'select' },
   ],
   salesorder: [
     { id: 'internalid', label: 'Internal ID', type: 'integer' },
@@ -38,59 +39,69 @@ const ACCOUNT = {
     { id: 'entity', label: 'Customer', type: 'select' },
     { id: 'total', label: 'Amount', type: 'currency' },
     { id: 'memo', label: 'Memo, with a comma', type: 'textarea' },
+    { id: 'custbody_delivery_window', label: 'Delivery Window', type: 'text' },
+  ],
+  // Custom records are instantiable, and their custom fields are real fields on them.
+  customrecord_project: [
+    { id: 'internalid', label: 'Internal ID', type: 'integer' },
+    { id: 'custrecord_project_customer', label: 'Customer', type: 'select', isMandatory: true },
   ],
   // Present in record.Type but not instantiable — the common case this must survive.
   bintransfer: [],
 }
 
+/**
+ * The real `customfield` shape: one unified table, UPPERCASE script ids, `name` rather
+ * than `label`, `fieldvaluetype` for the type and `fieldtype` for the placement, and a
+ * select target that is an integer internal id. No appliesto* columns — ownership comes
+ * from getFields(), which already knows.
+ */
 const CUSTOM_FIELDS = {
-  entityCustomField: [
+  customfield: [
     {
       internalid: 501,
-      scriptid: 'custentity_loyalty_tier',
-      label: 'Loyalty Tier',
-      fieldtype: 'SELECT',
+      scriptid: 'CUSTENTITY_LOYALTY_TIER',
+      name: 'Loyalty Tier',
       description: 'Which tier this customer sits in',
+      fieldtype: 'ENTITY',
+      fieldvaluetype: 'SELECT',
+      fieldvaluetyperecord: 7,
       ismandatory: 'F',
-      selectrecordtype: 'customlist_tiers',
-      appliestocustomer: 'T',
+      recordtype: 4,
     },
-  ],
-  transactionBodyCustomField: [
     {
       internalid: 502,
-      scriptid: 'custbody_delivery_window',
-      label: 'Delivery Window',
-      fieldtype: 'TEXT',
+      scriptid: 'CUSTBODY_DELIVERY_WINDOW',
+      name: 'Delivery Window',
       description: '',
+      fieldtype: 'BODY',
+      fieldvaluetype: 'TEXT',
+      fieldvaluetyperecord: '',
       ismandatory: 'T',
-      selectrecordtype: '',
-      appliestosalesorder: 'T',
+      recordtype: 5,
     },
-  ],
-  customRecordCustomField: [
     {
       internalid: 503,
-      scriptid: 'custrecord_project_customer',
-      label: 'Customer',
-      fieldtype: 'SELECT',
+      scriptid: 'CUSTRECORD_PROJECT_CUSTOMER',
+      name: 'Customer',
       description: 'Who the project is for',
+      fieldtype: 'RECORD',
+      fieldvaluetype: 'SELECT',
+      fieldvaluetyperecord: 20,
       ismandatory: 'T',
-      selectrecordtype: 'customer',
-      rectype: 'customrecord_project',
+      recordtype: 9,
     },
   ],
-  itemCustomField: [],
-  transactionColumnCustomField: [],
-  crmCustomField: [],
-  otherCustomField: [],
   CustomRecordType: [
     { internalid: 9, scriptid: 'customrecord_project', name: 'Project', description: 'A job' },
+    // The select target above resolves through this map. 7 is a list, 20 is a record.
+    { internalid: 7, scriptid: 'customlist_tiers', name: 'Tiers', description: '' },
+    { internalid: 20, scriptid: 'customer', name: 'Customer', description: '' },
   ],
-  CustomList: [{ id: 7, scriptid: 'customlist_tiers', name: 'Tiers' }],
-  CustomListValue: [
-    { list: 7, name: 'Gold', isinactive: 'F' },
-    { list: 7, name: 'Silver, tarnished', isinactive: 'F' },
+  CustomList: [{ internalid: 7, scriptid: 'CUSTOMLIST_TIERS', name: 'Tiers' }],
+  customlist_tiers: [
+    { id: 1, name: 'Gold', isinactive: 'F' },
+    { id: 2, name: 'Silver, tarnished', isinactive: 'F' },
   ],
 }
 
@@ -130,7 +141,11 @@ function runExport(scope = 'all') {
     inputSummary: { error: null },
   })
 
-  return { files: files.saved, mr }
+  return {
+    files: files.saved.filter((f) => f.name.endsWith('.csv')),
+    reports: files.saved.filter((f) => !f.name.endsWith('.csv')),
+    mr,
+  }
 }
 
 let csvText: string
@@ -140,8 +155,16 @@ beforeAll(() => {
 })
 
 describe('what the export produces', () => {
-  it('writes one file for an account this size', () => {
+  it('writes one CSV for an account this size', () => {
     expect(runExport().files).toHaveLength(1)
+  })
+
+  it('writes a report beside it saying what the export does and does not contain', () => {
+    const { reports } = runExport()
+    expect(reports).toHaveLength(1)
+    expect(reports[0]!.name).toBe('record-browser-export-REPORT.txt')
+    expect(reports[0]!.contents).toMatch(/EXPORT COMPLETE/)
+    expect(reports[0]!.contents).toMatch(/Reference targets/)
   })
 
   it('parses cleanly, comma-bearing labels and all', () => {
