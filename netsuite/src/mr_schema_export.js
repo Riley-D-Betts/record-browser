@@ -276,8 +276,24 @@ define([
 
     context.write({
       key: context.key,
-      value: JSON.stringify({ rows: rows, unmapped: unmapped, skipped: null }),
+      value: JSON.stringify({
+        rows: rows,
+        unmapped: unmapped,
+        skipped: null,
+        // Counted so `summarize` can tell "this schema genuinely has no relationships"
+        // apart from "we could not read the metadata that names them" — which look
+        // identical in the CSV and mean completely different things.
+        referenceTargets: countReferenceTargets(merged),
+      }),
     })
+  }
+
+  function countReferenceTargets(mergedFields) {
+    var found = 0
+    for (var i = 0; i < mergedFields.length; i++) {
+      if (referenceTargetOf(mergedFields[i])) found++
+    }
+    return found
   }
 
   /**
@@ -368,6 +384,8 @@ define([
     var groups = []
     var unmapped = {}
     var skippedTypes = []
+    var referenceTargets = 0
+    var fieldCount = 0
 
     context.output.iterator().each(function (key, value) {
       var payload = JSON.parse(value)
@@ -375,7 +393,11 @@ define([
         skippedTypes.push({ typeId: key, reason: payload.skipped })
         return true
       }
-      if (payload.rows && payload.rows.length) groups.push(payload.rows)
+      if (payload.rows && payload.rows.length) {
+        groups.push(payload.rows)
+        fieldCount += payload.rows.length
+      }
+      referenceTargets += payload.referenceTargets || 0
       for (var raw in payload.unmapped || {}) {
         if (!Object.prototype.hasOwnProperty.call(payload.unmapped, raw)) continue
         unmapped[raw] = (unmapped[raw] || 0) + payload.unmapped[raw]
@@ -401,7 +423,154 @@ define([
       written.push({ name: name, id: handle.save(), rows: parts[i].length })
     }
 
-    logSummary(written, unmapped, skippedTypes, context)
+    var health = describeHealth(fieldCount, referenceTargets, groups.length)
+    writeReport(folderId, written, health, unmapped, skippedTypes)
+    logSummary(written, unmapped, skippedTypes, health, context)
+  }
+
+  /**
+   * What this export is actually missing, in words.
+   *
+   * A run against a real account rejected every custom-field table ("Invalid search
+   * type: entityCustomField") and still wrote a large, wholly plausible CSV: every
+   * record type, every field, and silently **no relationships and no descriptions at
+   * all**. Nothing said so. Someone importing that would reasonably conclude their
+   * schema has no relationships, which is a false statement about their account rather
+   * than a gap in ours.
+   *
+   * So the export now decides, and says, whether it is complete — and an empty
+   * reference-target count is treated as a symptom rather than as an answer.
+   */
+  function describeHealth(fieldCount, referenceTargets, recordCount) {
+    var meta = customMetadata()
+    var failed = []
+    var ok = []
+
+    for (var i = 0; i < meta.diagnostics.tables.length; i++) {
+      var table = meta.diagnostics.tables[i]
+      if (table.error) failed.push({ table: table.table, error: table.error })
+      else ok.push(table.table)
+    }
+
+    var problems = []
+    if (failed.length && failed.length === meta.diagnostics.tables.length) {
+      problems.push(
+        'No custom field metadata could be read at all. Custom fields themselves are ' +
+          'still in this export — they come from getFields() on the record — but their ' +
+          'descriptions are missing, and so is every reference target.',
+      )
+    } else if (failed.length) {
+      problems.push(
+        failed.length +
+          ' of ' +
+          meta.diagnostics.tables.length +
+          ' custom field metadata queries failed, so this export is missing descriptions ' +
+          'and reference targets for the record types they cover.',
+      )
+    }
+
+    if (referenceTargets === 0 && fieldCount > 0) {
+      problems.push(
+        'Not one reference target was found across ' +
+          fieldCount +
+          ' fields. The catalog derives every relationship from that column, so this CSV ' +
+          'will import with NO relationships. On an account of this size that is far more ' +
+          'likely to be a failed metadata read than a schema with no foreign keys.',
+      )
+    }
+
+    if (meta.listError) {
+      problems.push('Custom list values could not be read: ' + meta.listError)
+    }
+
+    return {
+      complete: problems.length === 0,
+      problems: problems,
+      recordTypes: recordCount,
+      fields: fieldCount,
+      referenceTargets: referenceTargets,
+      metadataTablesRead: ok,
+      metadataTablesFailed: failed,
+    }
+  }
+
+  /**
+   * A companion file beside the CSV.
+   *
+   * The script log is the right place for detail, but nobody downloading a CSV from
+   * the File Cabinet reads the script log first. A sibling file with an unmissable name
+   * puts the caveat where the artifact is.
+   */
+  function writeReport(folderId, written, health, unmapped, skippedTypes) {
+    var lines = []
+    lines.push(health.complete ? 'EXPORT COMPLETE' : 'EXPORT INCOMPLETE — READ THIS FIRST')
+    lines.push('')
+    lines.push('Record types: ' + health.recordTypes)
+    lines.push('Fields:       ' + health.fields)
+    lines.push('Reference targets (these become relationships): ' + health.referenceTargets)
+    lines.push('')
+
+    for (var p = 0; p < health.problems.length; p++) {
+      lines.push('PROBLEM: ' + health.problems[p])
+      lines.push('')
+    }
+
+    if (health.metadataTablesFailed.length) {
+      lines.push('Metadata queries that failed:')
+      for (var f = 0; f < health.metadataTablesFailed.length; f++) {
+        lines.push(
+          '  ' +
+            health.metadataTablesFailed[f].table +
+            ' -> ' +
+            health.metadataTablesFailed[f].error,
+        )
+      }
+      lines.push('')
+      lines.push('Run the Suitelet with &debug=1 to see what this account does support.')
+      lines.push('')
+    }
+
+    var unmappedNames = []
+    for (var raw in unmapped) {
+      if (Object.prototype.hasOwnProperty.call(unmapped, raw)) {
+        unmappedNames.push('  ' + raw + ' (' + unmapped[raw] + ' fields)')
+      }
+    }
+    if (unmappedNames.length) {
+      lines.push('Field types with no mapping — these imported with no type:')
+      lines.push(unmappedNames.join('\n'))
+      lines.push('')
+    }
+
+    if (skippedTypes.length) {
+      lines.push(skippedTypes.length + ' record types could not be read:')
+      for (var s = 0; s < Math.min(skippedTypes.length, 40); s++) {
+        lines.push('  ' + skippedTypes[s].typeId + ' -> ' + skippedTypes[s].reason)
+      }
+      if (skippedTypes.length > 40) lines.push('  … and ' + (skippedTypes.length - 40) + ' more')
+      lines.push('')
+    }
+
+    lines.push('Files written:')
+    for (var w = 0; w < written.length; w++) {
+      lines.push('  ' + written[w].name + ' (' + written[w].rows + ' rows)')
+    }
+
+    try {
+      file
+        .create({
+          name: health.complete
+            ? 'record-browser-export-REPORT.txt'
+            : 'record-browser-export-INCOMPLETE-README.txt',
+          fileType: file.Type.PLAINTEXT,
+          contents: lines.join('\n'),
+          folder: folderId,
+        })
+        .save()
+    } catch (e) {
+      // The report is a courtesy; failing to write it must not lose the export itself.
+      log.error({ title: 'Could not write the export report', details: String(e) })
+    }
   }
 
   /**
@@ -428,11 +597,29 @@ define([
     return parts.length ? parts : [[]]
   }
 
-  function logSummary(written, unmapped, skippedTypes, context) {
+  function logSummary(written, unmapped, skippedTypes, health, context) {
     log.audit({
-      title: 'Schema export complete',
-      details: JSON.stringify({ files: written, skippedTypes: skippedTypes.length }),
+      title: health.complete ? 'Schema export complete' : 'Schema export finished, but incomplete',
+      details: JSON.stringify({
+        files: written,
+        skippedTypes: skippedTypes.length,
+        recordTypes: health.recordTypes,
+        fields: health.fields,
+        referenceTargets: health.referenceTargets,
+      }),
     })
+
+    // Logged at error level on purpose. This is the difference between a CSV that
+    // describes the account and one that quietly describes half of it.
+    if (!health.complete) {
+      log.error({
+        title: 'This export is incomplete — see the README file written beside the CSV',
+        details: JSON.stringify({
+          problems: health.problems,
+          metadataTablesFailed: health.metadataTablesFailed,
+        }),
+      })
+    }
 
     // Unmapped types are the actionable output: each one is a field that imported with
     // no type at all. Named with a count so the first run tells you what to add to

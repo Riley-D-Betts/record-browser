@@ -78,10 +78,75 @@ The role running the Suitelet needs:
 - View access to the record types you want enumerated. A type the role cannot see is
   reported as skipped rather than silently omitted.
 
+## What a real account said
+
+The first production run is worth reading before you deploy this, because it changed
+the design:
+
+```
+entityCustomField            -> "Invalid search type: entityCustomField"
+itemCustomField              -> "Invalid search type: itemCustomField"
+transactionBodyCustomField   -> (same)
+transactionColumnCustomField -> (same)
+crmCustomField               -> (same)
+otherCustomField             -> (same)
+customRecordCustomField      -> (same)
+
+CustomList        -> "Unknown identifier '"ID"'. Available identifiers are: {customlist=CustomList}"
+CustomRecordType  -> worked, 244 rows
+```
+
+Three things follow from that, and all three are now built in.
+
+**`CustomRecordType` resolved in PascalCase**, so SuiteQL table lookup is not
+case-sensitive — which means those seven names are not tables on that account at all,
+and trying another casing would have been a third wrong guess. Table names are now
+*probed* from a candidate list, and every attempt is recorded with the error it gave.
+
+**One guessed column name lost every row.** `SELECT id … FROM CustomList` failed
+entirely because `id` was not a column — SuiteQL fails the whole statement on one
+unknown identifier. Every query is now `SELECT *`, and each value is read under any of
+several possible column names. A column we did not expect costs nothing; a column that
+is missing costs only that column.
+
+**The export looked fine.** It wrote a large, wholly plausible CSV — every record type,
+every field — with zero relationships and zero descriptions, and said nothing. That is
+the worst possible shape for a failure: not obviously empty, just quietly incomplete.
+Someone importing it would conclude their schema has no relationships.
+
+So the export now judges itself. It counts reference targets, and writes a companion
+file beside the CSV — `record-browser-export-INCOMPLETE-README.txt` when something is
+missing — naming what failed and what the CSV therefore does not contain. Finding zero
+reference targets across thousands of fields is treated as a symptom, not an answer.
+
+### What survives a total metadata failure
+
+Worth knowing, because it is more than you would expect:
+
+| | |
+|---|---|
+| Record types | ✅ from `record.Type` and `CustomRecordType` |
+| Fields, including custom ones | ✅ `getFields()` returns them — they are real fields on the record |
+| Field types | ✅ from `Field.type` |
+| Native vs custom | ✅ from NetSuite's own id naming, no metadata needed |
+| Required | ✅ from `Field.isMandatory` |
+| **Reference targets → relationships** | ❌ **needs the metadata** |
+| Descriptions on custom fields | ❌ needs the metadata |
+| Allowed values from custom lists | ❌ needs the metadata |
+
 ## Run it once with `&debug=1` first
 
-Append `&debug=1` to the Suitelet URL. It dumps the raw SuiteQL rows without mapping
-them, which answers the two questions that could not be settled without a real account:
+Append `&debug=1` to the Suitelet URL. It dumps every candidate table name it tried,
+the error each gave, and the **actual column names** of any row that came back — since
+`SELECT *` means whatever this account has is what shows up. It leads with a plain
+verdict on whether custom field metadata is readable at all.
+
+That output is what to act on. If a table name works that is not in the list, add it to
+`TABLES` in `lib_customfield_query.js`; if a column comes back under a name the reader
+does not know, add it to the relevant `pick(...)` list. Both are one-line changes, and
+the dump tells you exactly which.
+
+It also answers the two questions that could not be settled without a real account:
 
 - **Does `fieldtype` come back as `TEXT` or as a number like `106`?** Both are carried
   through untouched. The type catalog maps the code and reports a number as unmapped,

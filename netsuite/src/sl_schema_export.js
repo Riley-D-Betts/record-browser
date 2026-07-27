@@ -168,13 +168,35 @@ define([
       if (Object.prototype.hasOwnProperty.call(fields.byRecord, key)) recordKeys.push(key)
     }
 
+    /**
+     * `attempts` is the part to read. Every candidate table name, and what this
+     * account said about each — so the next fix is aimed by what the account reports
+     * rather than by another guess. Two have already been wrong.
+     */
     json(context, 200, {
+      verdict: recordKeys.length
+        ? 'Custom field metadata IS readable on this account.'
+        : 'No custom field metadata could be read. Reference targets and descriptions ' +
+          'will be missing from the export — read the attempts below and add the name ' +
+          'that works to TABLES in lib_customfield_query.js.',
+      unified: fields.diagnostics.unified,
       tables: fields.diagnostics.tables,
+      // The keys of a real row, which is how column names get confirmed rather than
+      // guessed. `SELECT *` means whatever this account has is what shows up here.
       rawSample: fields.diagnostics.rawSample,
+      rawSampleColumns: fields.diagnostics.rawSample.map(function (s) {
+        var keys = []
+        for (var k in s.row) {
+          if (Object.prototype.hasOwnProperty.call(s.row, k)) keys.push(k)
+        }
+        return { table: s.table, columns: keys }
+      }),
       recordKeysFound: recordKeys.slice(0, 50),
       customRecordTypes: types.rows.length,
       customRecordTypesError: types.error,
+      customRecordTypeAttempts: types.attempts,
       customListsError: lists.error,
+      customListAttempts: lists.attempts,
     })
   }
 

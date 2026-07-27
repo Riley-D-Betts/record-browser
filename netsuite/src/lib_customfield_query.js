@@ -25,14 +25,35 @@ define(['N/query'], function (query) {
    * saying "belongs to" into a record type.
    */
   var TABLES = [
-    { table: 'entityCustomField', kind: 'entity' },
-    { table: 'itemCustomField', kind: 'item' },
-    { table: 'transactionBodyCustomField', kind: 'transactionBody' },
-    { table: 'transactionColumnCustomField', kind: 'transactionColumn' },
-    { table: 'crmCustomField', kind: 'crm' },
-    { table: 'otherCustomField', kind: 'other' },
-    { table: 'customRecordCustomField', kind: 'customRecord' },
+    { kind: 'entity', candidates: ['entitycustomfield', 'EntityCustomField'] },
+    { kind: 'item', candidates: ['itemcustomfield', 'ItemCustomField'] },
+    {
+      kind: 'transactionBody',
+      candidates: ['transactionbodycustomfield', 'TransactionBodyCustomField'],
+    },
+    {
+      kind: 'transactionColumn',
+      // `transactioncolumnfield` is NetSuite's own name for this one in several places
+      // — it is the one table in the set whose name does not follow the pattern.
+      candidates: [
+        'transactioncolumncustomfield',
+        'transactioncolumnfield',
+        'TransactionColumnCustomField',
+      ],
+    },
+    { kind: 'crm', candidates: ['crmcustomfield', 'CrmCustomField'] },
+    { kind: 'other', candidates: ['othercustomfield', 'OtherCustomField'] },
+    {
+      kind: 'customRecord',
+      candidates: ['customrecordcustomfield', 'customrecordfield', 'CustomRecordCustomField'],
+    },
   ]
+
+  /**
+   * Tried before the per-type tables: if one unified table exists, it answers
+   * everything at once and the seven separate probes never run.
+   */
+  var UNIFIED_CANDIDATES = ['customfield', 'CustomField']
 
   /**
    * Columns every custom-field table is expected to carry.
@@ -41,18 +62,6 @@ define(['N/query'], function (query) {
    * than the rest — but it is also the one most likely to be absent, hence the retry
    * below with a reduced list.
    */
-  var CORE_COLUMNS = [
-    'internalid',
-    'scriptid',
-    'label',
-    'fieldtype',
-    'description',
-    'ismandatory',
-    'selectrecordtype',
-  ]
-
-  var MINIMAL_COLUMNS = ['internalid', 'scriptid', 'label', 'fieldtype']
-
   function runSuiteQL(sql) {
     try {
       return { rows: query.runSuiteQL({ query: sql }).asMappedResults(), error: null }
@@ -62,25 +71,66 @@ define(['N/query'], function (query) {
   }
 
   /**
-   * One table, with a reduced retry.
+   * `SELECT *`, never a column list.
    *
-   * SuiteQL fails the entire statement on one unknown column, so "ask for everything
-   * and see" would return nothing at all on an account missing a single field. Asking
-   * again for the four columns that certainly exist turns a total loss into a partial
-   * one.
+   * A named column that the account does not have fails the *entire* statement — a
+   * real run died on `SELECT id … FROM CustomList` with "Unknown identifier 'ID'",
+   * losing every custom list value over one guessed name. Asking for everything and
+   * reading what comes back cannot fail that way, and these are metadata tables of
+   * hundreds of rows, not millions, so the cost of the extra columns is nothing.
+   *
+   * `normaliseField` below then takes what it recognises and ignores the rest, which
+   * is the shape that survives an account whose schema differs from the one we expect.
    */
-  function readTable(spec) {
-    var full = runSuiteQL('SELECT ' + CORE_COLUMNS.join(', ') + ' FROM ' + spec.table)
-    if (!full.error) return { rows: full.rows, kind: spec.kind, degraded: false, error: null }
+  function selectAll(table) {
+    return runSuiteQL('SELECT * FROM ' + table)
+  }
 
-    var minimal = runSuiteQL('SELECT ' + MINIMAL_COLUMNS.join(', ') + ' FROM ' + spec.table)
-    return {
-      rows: minimal.rows,
-      kind: spec.kind,
-      degraded: !minimal.error,
-      // The first failure is the informative one: it names the column that is missing.
-      error: minimal.error ? minimal.error : full.error,
+  /**
+   * Find which of several candidate names this account actually has.
+   *
+   * A real run rejected all seven per-type custom field tables with "Invalid search
+   * type: entityCustomField", while `CustomRecordType` worked — in PascalCase — so
+   * resolution is not case-sensitive and those names simply are not tables here.
+   * Guessing a different spelling a third time is not a strategy; asking is.
+   *
+   * Every attempt is recorded, including the failures, because the error text is the
+   * only thing that says *why* — and `&debug=1` exists to put it in front of someone.
+   */
+  function probe(candidates) {
+    var attempts = []
+    for (var i = 0; i < candidates.length; i++) {
+      var result = selectAll(candidates[i])
+      attempts.push({
+        name: candidates[i],
+        ok: !result.error,
+        rows: result.rows.length,
+        error: result.error,
+      })
+      if (!result.error) {
+        return { name: candidates[i], rows: result.rows, attempts: attempts }
+      }
     }
+    return { name: null, rows: [], attempts: attempts }
+  }
+
+  function readTable(spec) {
+    var found = probe(spec.candidates)
+    return {
+      rows: found.rows,
+      kind: spec.kind,
+      resolvedName: found.name,
+      attempts: found.attempts,
+      // The last attempt's error is the informative one when nothing resolved.
+      error: found.name ? null : lastError(found.attempts),
+    }
+  }
+
+  function lastError(attempts) {
+    for (var i = attempts.length - 1; i >= 0; i--) {
+      if (attempts[i].error) return attempts[i].error
+    }
+    return 'No candidate table name resolved'
   }
 
   /**
@@ -92,18 +142,42 @@ define(['N/query'], function (query) {
    */
   function readCustomFields() {
     var byRecord = {}
-    var diagnostics = { tables: [], rawSample: [] }
+    var diagnostics = { tables: [], rawSample: [], unified: null }
+
+    // One unified table, if this account has one, saves seven probes.
+    var unified = probe(UNIFIED_CANDIDATES)
+    diagnostics.unified = { resolved: unified.name, attempts: unified.attempts }
+    if (unified.name && unified.rows.length) {
+      diagnostics.rawSample.push({ table: unified.name, row: unified.rows[0] })
+      for (var u = 0; u < unified.rows.length; u++) {
+        var unifiedOwners = ownersOf(unified.rows[u], 'unified')
+        for (var uo = 0; uo < unifiedOwners.length; uo++) {
+          if (!byRecord[unifiedOwners[uo]]) byRecord[unifiedOwners[uo]] = []
+          byRecord[unifiedOwners[uo]].push(normaliseField(unified.rows[u]))
+        }
+      }
+      diagnostics.tables.push({
+        table: unified.name,
+        rows: unified.rows.length,
+        attempts: unified.attempts,
+        error: null,
+      })
+      return { byRecord: byRecord, diagnostics: diagnostics }
+    }
 
     for (var i = 0; i < TABLES.length; i++) {
       var result = readTable(TABLES[i])
       diagnostics.tables.push({
-        table: TABLES[i].table,
+        table: result.resolvedName || TABLES[i].candidates[0],
+        kind: TABLES[i].kind,
         rows: result.rows.length,
-        degraded: result.degraded,
+        // Every name tried, with the error each gave. This is what makes a third wrong
+        // guess unnecessary: the next fix is aimed by data, not by another hunch.
+        attempts: result.attempts,
         error: result.error,
       })
       if (result.rows.length && diagnostics.rawSample.length < 10) {
-        diagnostics.rawSample.push({ table: TABLES[i].table, row: result.rows[0] })
+        diagnostics.rawSample.push({ table: result.resolvedName, row: result.rows[0] })
       }
 
       for (var r = 0; r < result.rows.length; r++) {
@@ -130,9 +204,12 @@ define(['N/query'], function (query) {
    * it produces no owner rather than a wrong one, and `&debug=1` shows the real keys.
    */
   function ownersOf(row, kind) {
-    if (kind === 'customRecord') {
-      var rectype = row.rectype || row.recordtype || row.recType
-      return rectype ? [String(rectype)] : []
+    if (kind === 'customRecord' || kind === 'unified') {
+      var rectype = pick(row, ['rectype', 'recordtype', 'recType', 'owner', 'customrecordtype'])
+      if (rectype) return [String(rectype).toLowerCase()]
+      // A unified table row that names no record type still has appliesto flags to
+      // fall back on, so this deliberately does not return early.
+      if (kind === 'customRecord') return []
     }
 
     var owners = []
@@ -164,37 +241,52 @@ define(['N/query'], function (query) {
    * first run instead of as silently wrong types.
    */
   function normaliseField(row) {
+    var fieldType = pick(row, ['fieldtype', 'fieldType', 'type', 'customfieldtype'])
     return {
-      internalId: row.internalid !== undefined ? String(row.internalid) : '',
-      scriptId: row.scriptid ? String(row.scriptid) : '',
-      label: row.label ? String(row.label) : '',
-      rawFieldType: row.fieldtype !== undefined && row.fieldtype !== null ? row.fieldtype : '',
-      description: row.description ? String(row.description) : '',
-      isMandatory: isTruthyFlag(row.ismandatory),
-      selectRecordType:
-        row.selectrecordtype !== undefined && row.selectrecordtype !== null
-          ? String(row.selectrecordtype)
-          : '',
+      internalId: String(pick(row, ['internalid', 'id', 'recordid'])),
+      scriptId: String(pick(row, ['scriptid', 'scriptId'])),
+      label: String(pick(row, ['label', 'name', 'fieldlabel'])),
+      rawFieldType: fieldType === '' ? '' : fieldType,
+      description: String(pick(row, ['description', 'help', 'helptext'])),
+      isMandatory: isTruthyFlag(pick(row, ['ismandatory', 'mandatory', 'isrequired'])),
+      selectRecordType: String(
+        pick(row, ['selectrecordtype', 'selectRecordType', 'recordtype', 'sourcelist']),
+      ),
     }
+  }
+
+  /**
+   * A value under any of several possible column names.
+   *
+   * Which name a table uses is exactly the thing that has been wrong twice, so nothing
+   * reads a column by a single hard-coded name any more.
+   */
+  function pick(row, names) {
+    for (var i = 0; i < names.length; i++) {
+      var value = row[names[i]]
+      if (value !== undefined && value !== null && value !== '') return value
+    }
+    return ''
   }
 
   /** Custom record types: the ones that are records in their own right. */
   function readCustomRecordTypes() {
-    var result = runSuiteQL(
-      'SELECT internalid, scriptid, name, description FROM CustomRecordType',
-    )
+    var found = probe(['CustomRecordType', 'customrecordtype'])
     var rows = []
-    for (var i = 0; i < result.rows.length; i++) {
-      var row = result.rows[i]
-      if (!row.scriptid) continue
+
+    for (var i = 0; i < found.rows.length; i++) {
+      var row = found.rows[i]
+      var scriptId = pick(row, ['scriptid', 'scriptId', 'SCRIPTID'])
+      if (!scriptId) continue
       rows.push({
-        typeId: String(row.scriptid).toLowerCase(),
-        internalId: row.internalid !== undefined ? String(row.internalid) : '',
-        label: row.name ? String(row.name) : String(row.scriptid),
-        description: row.description ? String(row.description) : '',
+        typeId: String(scriptId).toLowerCase(),
+        internalId: String(pick(row, ['internalid', 'id', 'recordid'])),
+        label: String(pick(row, ['name', 'recordname', 'label']) || scriptId),
+        description: String(pick(row, ['description'])),
       })
     }
-    return { rows: rows, error: result.error }
+
+    return { rows: rows, error: found.name ? null : lastError(found.attempts), attempts: found.attempts }
   }
 
   /**
@@ -204,30 +296,40 @@ define(['N/query'], function (query) {
    * a field points at one or the other depending on where the metadata came from.
    */
   function readCustomListValues() {
-    var lists = runSuiteQL('SELECT id, scriptid, name FROM CustomList')
-    if (lists.error) return { byList: {}, error: lists.error }
+    var lists = probe(['CustomList', 'customlist'])
+    if (!lists.name) {
+      return { byList: {}, error: lastError(lists.attempts), attempts: lists.attempts }
+    }
 
-    var values = runSuiteQL('SELECT list, name, isinactive FROM CustomListValue')
-    if (values.error) return { byList: {}, error: values.error }
+    var values = probe(['CustomListValue', 'customlistvalue', 'customlist_value'])
+    if (!values.name) {
+      return { byList: {}, error: lastError(values.attempts), attempts: values.attempts }
+    }
 
     var byInternalId = {}
     for (var v = 0; v < values.rows.length; v++) {
       var value = values.rows[v]
-      if (isTruthyFlag(value.isinactive)) continue
-      var listId = String(value.list)
+      if (isTruthyFlag(pick(value, ['isinactive', 'inactive']))) continue
+      var listId = String(pick(value, ['list', 'listid', 'customlist', 'parent']))
+      var name = String(pick(value, ['name', 'value', 'label']))
+      if (!listId || !name) continue
       if (!byInternalId[listId]) byInternalId[listId] = []
-      byInternalId[listId].push(String(value.name))
+      byInternalId[listId].push(name)
     }
 
+    // Keyed by both, because `selectrecordtype` on a field points at one or the other
+    // depending on where the metadata came from.
     var byList = {}
     for (var l = 0; l < lists.rows.length; l++) {
       var list = lists.rows[l]
-      var members = byInternalId[String(list.id)] || []
-      byList[String(list.id)] = members
-      if (list.scriptid) byList[String(list.scriptid).toLowerCase()] = members
+      var internalId = String(pick(list, ['internalid', 'id', 'recordid']))
+      var scriptId = pick(list, ['scriptid', 'scriptId'])
+      var members = byInternalId[internalId] || []
+      if (internalId) byList[internalId] = members
+      if (scriptId) byList[String(scriptId).toLowerCase()] = members
     }
 
-    return { byList: byList, error: null }
+    return { byList: byList, error: null, attempts: lists.attempts.concat(values.attempts) }
   }
 
   return {

@@ -41,29 +41,74 @@ describe('reading a table', () => {
     expect(result.byRecord.customer[0].description).toBe('Which tier this customer sits in')
   })
 
-  it('falls back to the four certain columns when one is missing', () => {
-    // Without the retry, an account lacking `selectrecordtype` returns *nothing at
-    // all* from that table rather than losing one column.
+  it('loses nothing when a column we expected is absent', () => {
+    // This is why it asks for `SELECT *` rather than a column list. A real run died on
+    // `SELECT id … FROM CustomList` with "Unknown identifier 'ID'" — SuiteQL fails the
+    // whole statement on one unknown column, so a single guessed name cost every row.
     const lib = load({
       ...EMPTY,
       entityCustomField: [
-        { internalid: 1, scriptid: 'custentity_x', label: 'X', fieldtype: 'TEXT' },
+        // No `selectrecordtype`, no `description`, no `ismandatory`.
+        { internalid: 1, scriptid: 'custentity_x', label: 'X', fieldtype: 'TEXT', appliestocustomer: 'T' },
       ],
     })
     const result = lib.readCustomFields()
-    const table = result.diagnostics.tables.find((t: any) => t.table === 'entityCustomField')
-    expect(table.degraded).toBe(true)
-    expect(table.rows).toBe(1)
+    expect(result.byRecord.customer).toHaveLength(1)
+    expect(result.byRecord.customer[0].scriptId).toBe('custentity_x')
+    expect(result.byRecord.customer[0].selectRecordType).toBe('')
+  })
+
+  it('reads a column under whatever name this account gives it', () => {
+    // `label` vs `name`, `ismandatory` vs `mandatory` — which spelling a table uses is
+    // precisely what has been wrong twice, so nothing reads a single hard-coded name.
+    const lib = load({
+      ...EMPTY,
+      entityCustomField: [
+        { id: 4, scriptid: 'custentity_y', name: 'Y label', type: 'TEXT', mandatory: 'T', appliestocustomer: 'T' },
+      ],
+    })
+    const field = lib.readCustomFields().byRecord.customer[0]
+    expect(field.internalId).toBe('4')
+    expect(field.label).toBe('Y label')
+    expect(field.rawFieldType).toBe('TEXT')
+    expect(field.isMandatory).toBe(true)
   })
 
   it('records a table it could not read at all, and carries on with the rest', () => {
     const lib = load({ ...EMPTY, itemCustomField: [fullRow({ scriptid: 'custitem_x' })] })
-    delete (EMPTY as any).nothing
     const result = lib.readCustomFields()
-    // entityCustomField is present but empty; nothing throws, and the item table's row
-    // still comes back.
     expect(result.diagnostics.tables).toHaveLength(7)
     expect(result.diagnostics.tables.every((t: any) => t.error === null)).toBe(true)
+  })
+
+  it('records every name it tried and what each one said', () => {
+    // The output that aims the next fix. Guessing a third spelling is not a strategy.
+    const lib = loadAmd('src/lib_customfield_query.js', {
+      'N/query': {
+        runSuiteQL({ query }: { query: string }) {
+          throw new Error(`Invalid search type: ${/FROM\\s+(\\w+)/i.exec(query)?.[1]}`)
+        },
+      },
+    })
+    const result = lib.readCustomFields()
+    const entity = result.diagnostics.tables.find((t: any) => t.kind === 'entity')
+    expect(entity.attempts.length).toBeGreaterThan(1)
+    expect(entity.attempts.every((a: any) => a.ok === false)).toBe(true)
+    expect(entity.attempts[0].error).toMatch(/Invalid search type/)
+  })
+
+  it('prefers a unified table when the account has one, and skips the seven probes', () => {
+    const lib = loadAmd('src/lib_customfield_query.js', {
+      'N/query': fakeQuery({
+        customfield: [
+          { internalid: 1, scriptid: 'custentity_z', label: 'Z', fieldtype: 'TEXT', rectype: 'Customer' },
+        ],
+      }),
+    })
+    const result = lib.readCustomFields()
+    expect(result.diagnostics.unified.resolved).toBe('customfield')
+    expect(result.byRecord.customer).toHaveLength(1)
+    expect(result.diagnostics.tables).toHaveLength(1)
   })
 
   it('reports the missing column by name, which is the actionable part', () => {
@@ -141,7 +186,8 @@ describe('the field type this account actually returns', () => {
   it('keeps a sample of raw rows so one debug run answers the question', () => {
     const lib = load({ ...EMPTY, entityCustomField: [fullRow()] })
     const result = lib.readCustomFields()
-    expect(result.diagnostics.rawSample[0].table).toBe('entityCustomField')
+    // The name that actually resolved, not the one we asked for first.
+    expect(result.diagnostics.rawSample[0].table).toBe('entitycustomfield')
     expect(result.diagnostics.rawSample[0].row).toHaveProperty('appliestocustomer')
   })
 })

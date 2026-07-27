@@ -130,7 +130,11 @@ function runExport(scope = 'all') {
     inputSummary: { error: null },
   })
 
-  return { files: files.saved, mr }
+  return {
+    files: files.saved.filter((f) => f.name.endsWith('.csv')),
+    reports: files.saved.filter((f) => !f.name.endsWith('.csv')),
+    mr,
+  }
 }
 
 let csvText: string
@@ -140,8 +144,16 @@ beforeAll(() => {
 })
 
 describe('what the export produces', () => {
-  it('writes one file for an account this size', () => {
+  it('writes one CSV for an account this size', () => {
     expect(runExport().files).toHaveLength(1)
+  })
+
+  it('writes a report beside it saying what the export does and does not contain', () => {
+    const { reports } = runExport()
+    expect(reports).toHaveLength(1)
+    expect(reports[0]!.name).toBe('record-browser-export-REPORT.txt')
+    expect(reports[0]!.contents).toMatch(/EXPORT COMPLETE/)
+    expect(reports[0]!.contents).toMatch(/Reference targets/)
   })
 
   it('parses cleanly, comma-bearing labels and all', () => {

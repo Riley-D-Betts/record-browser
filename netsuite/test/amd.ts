@@ -120,7 +120,7 @@ export function fakeFile() {
   const saved: Array<{ name: string; contents: string; folder: number }> = []
   return {
     saved,
-    Type: { CSV: 'CSV' },
+    Type: { CSV: 'CSV', PLAINTEXT: 'PLAINTEXT' },
     create({ name, contents, folder }: { name: string; contents: string; folder: number }) {
       return {
         save() {
