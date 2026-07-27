@@ -24,10 +24,11 @@ define([
   'N/file',
   'N/https',
   'N/log',
+  'N/record',
   'N/runtime',
   'N/url',
   './lib_customfield_query',
-], function (task, file, https, log, runtime, url, customFields) {
+], function (task, file, https, log, record, runtime, url, customFields) {
   var MAP_REDUCE_SCRIPT_ID = 'customscript_trb_schema_export'
   var MAP_REDUCE_DEPLOYMENT_ID = 'customdeploy_trb_schema_export'
 
@@ -160,44 +161,88 @@ define([
    */
   function debugDump(context) {
     var fields = customFields.readCustomFields()
-    var lists = customFields.readCustomListValues()
     var types = customFields.readCustomRecordTypes()
+    var schema = fields.schema
 
-    var recordKeys = []
-    for (var key in fields.byRecord) {
-      if (Object.prototype.hasOwnProperty.call(fields.byRecord, key)) recordKeys.push(key)
+    var scriptIds = []
+    for (var key in fields.byScriptId) {
+      if (Object.prototype.hasOwnProperty.call(fields.byScriptId, key)) scriptIds.push(key)
     }
 
     /**
-     * `attempts` is the part to read. Every candidate table name, and what this
-     * account said about each — so the next fix is aimed by what the account reports
-     * rather than by another guess. Two have already been wrong.
+     * The resolution map is the headline. Everything else here is supporting evidence.
+     *
+     * Two API surfaces have already been guessed wrong, so this reports which column
+     * was chosen for each job and what values that column actually holds — enough for
+     * one run to settle whether the choice was right, rather than another round of
+     * plausible-looking wrong output.
+     *
+     * Full rows are deliberately not dumped: they are field-level account data, and
+     * the column names plus a value histogram answer every question the rows would.
      */
     json(context, 200, {
-      verdict: recordKeys.length
-        ? 'Custom field metadata IS readable on this account.'
-        : 'No custom field metadata could be read. Reference targets and descriptions ' +
-          'will be missing from the export — read the attempts below and add the name ' +
-          'that works to TABLES in lib_customfield_query.js.',
-      unified: fields.diagnostics.unified,
-      tables: fields.diagnostics.tables,
-      // The keys of a real row, which is how column names get confirmed rather than
-      // guessed. `SELECT *` means whatever this account has is what shows up here.
-      rawSample: fields.diagnostics.rawSample,
-      rawSampleColumns: fields.diagnostics.rawSample.map(function (s) {
-        var keys = []
-        for (var k in s.row) {
-          if (Object.prototype.hasOwnProperty.call(s.row, k)) keys.push(k)
-        }
-        return { table: s.table, columns: keys }
-      }),
-      recordKeysFound: recordKeys.slice(0, 50),
+      verdict: verdictFor(schema, scriptIds.length),
+      source: { table: schema.table, state: schema.state, errorClass: schema.errorClass, error: schema.error },
+      columnsUsed: schema.roles,
+      rolesUnresolved: schema.unresolved,
+      columnsAvailable: schema.columns,
+      namesTried: schema.attempts,
+      rowsRead: schema.rowsRead,
+      customFieldScriptIds: scriptIds.length,
+      sampleScriptIds: scriptIds.slice(0, 15),
+
+      /**
+       * The distinct values of the column chosen as the data type, with counts.
+       * `BODY`/`ENTITY`/`COLUMN` here means the placement column was picked instead of
+       * the type column — the one mistake that produces a confident wrong catalog.
+       */
+      dataTypeValues: schema.typeValueCounts,
+
       customRecordTypes: types.rows.length,
       customRecordTypesError: types.error,
       customRecordTypeAttempts: types.attempts,
-      customListsError: lists.error,
-      customListAttempts: lists.attempts,
+
+      /**
+       * One unverified hypothesis, probed and reported, depended on by nothing.
+       * Oracle's objectIDMap marks these types `inScript:"F"`, so this is expected to
+       * fail — but if it works it would yield the appliesto* flags directly.
+       */
+      recordLoadProbe: probeRecordLoad(),
     })
+  }
+
+  function verdictFor(schema, found) {
+    if (schema.state === 'failed') {
+      return (
+        'Custom field metadata could NOT be read (' +
+        schema.errorClass +
+        '). Fields still export — they come from getFields() — but no descriptions and ' +
+        'no reference targets, so the CSV will import with no relationships.'
+      )
+    }
+    if (schema.state === 'empty') {
+      return (
+        schema.table +
+        ' exists but returned no rows, so its columns could not be verified. Either ' +
+        'this account has no custom fields, or the query matched nothing.'
+      )
+    }
+    return (
+      'Custom field metadata IS readable: ' +
+      found +
+      ' fields from ' +
+      schema.table +
+      '. Check `columnsUsed` and `dataTypeValues` below before trusting the types.'
+    )
+  }
+
+  function probeRecordLoad() {
+    try {
+      var loaded = record.load({ type: 'entitycustomfield', id: 1 })
+      return { worked: true, fields: (loaded.getFields() || []).slice(0, 40) }
+    } catch (e) {
+      return { worked: false, error: e && e.message ? e.message : String(e) }
+    }
   }
 
   // -------------------------------------------------------------------------

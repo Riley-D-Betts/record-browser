@@ -34,7 +34,10 @@ const ACCOUNT = {
   ],
 }
 
-/** Every SuiteQL statement fails the way the real account failed. */
+/**
+ * The metadata table is unreadable, in the exact shape the real account reported it.
+ * `CustomRecordType` still works, as it did there — that asymmetry is the point.
+ */
 const deadQuery = {
   runSuiteQL({ query }: { query: string }) {
     const table = /FROM\s+(\w+)/i.exec(query)?.[1] ?? '?'
@@ -42,7 +45,7 @@ const deadQuery = {
       // The one that worked. 244 rows on the real account; one is enough here.
       return {
         asMappedResults: () => [
-          { internalid: 9, scriptid: 'customrecord_project', name: 'Project', description: '' },
+          { internalid: 9, scriptid: 'customrecord_other', name: 'Other', description: '' },
         ],
       }
     }
@@ -143,7 +146,7 @@ describe('an account where every custom-field query fails', () => {
   it('names the queries that failed, so the next run can be aimed', () => {
     const { logged } = runDegraded()
     const text = JSON.stringify(logged)
-    expect(text).toMatch(/entitycustomfield/i)
+    expect(text).toMatch(/customfield/i)
   })
 
   it('writes the caveat beside the CSV, under a filename nobody can miss', () => {
@@ -155,7 +158,7 @@ describe('an account where every custom-field query fails', () => {
 
     const text = reports[0]!.contents
     expect(text).toMatch(/EXPORT INCOMPLETE/)
-    expect(text).toMatch(/entitycustomfield/i)
+    expect(text).toMatch(/customfield/i)
     expect(text).toMatch(/Reference targets \(these become relationships\): 0/)
     expect(text).toMatch(/debug=1/)
   })

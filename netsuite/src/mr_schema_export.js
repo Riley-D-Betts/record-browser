@@ -57,24 +57,42 @@ define([
     var scope = String(scriptParam('custscript_trb_scope', 'all'))
     var work = []
 
-    if (scope === 'all' || scope === 'standard') {
-      for (var key in record.Type) {
-        if (!Object.prototype.hasOwnProperty.call(record.Type, key)) continue
-        work.push({ typeId: String(record.Type[key]), label: humanise(key), custom: false })
-      }
+    /**
+     * Deduplicated by type id, and not as a nicety.
+     *
+     * The importer treats one field described twice as a hard error and refuses the
+     * *entire* file — so a single type appearing in both lists would cost the whole
+     * export. `record.Type` is not supposed to contain custom records, but "supposed
+     * to" is what put two wrong API surfaces in this file already.
+     */
+    var seen = {}
+    function add(item) {
+      var key = String(item.typeId).toLowerCase()
+      if (!key || seen[key]) return
+      seen[key] = true
+      work.push(item)
     }
 
+    // Custom types first: they carry a real label and description, which the
+    // humanised enum key does not.
     if (scope === 'all' || scope === 'custom') {
       var customTypes = customFields.readCustomRecordTypes()
       for (var i = 0; i < customTypes.rows.length; i++) {
         var t = customTypes.rows[i]
-        work.push({
+        add({
           typeId: t.typeId,
           label: t.label,
           externalId: t.internalId,
           description: t.description,
           custom: true,
         })
+      }
+    }
+
+    if (scope === 'all' || scope === 'standard') {
+      for (var key in record.Type) {
+        if (!Object.prototype.hasOwnProperty.call(record.Type, key)) continue
+        add({ typeId: String(record.Type[key]), label: humanise(key), custom: false })
       }
     }
 
@@ -196,26 +214,68 @@ define([
   // -------------------------------------------------------------------------
 
   /**
-   * Custom fields are read once here rather than per `map` call.
+   * Metadata is read once, in `getInputData`, and carried on the work items.
    *
-   * Reading them inside `map` would repeat seven SuiteQL statements for every one of
-   * ~200 record types. Read once and cached per execution context, it is seven
-   * statements total.
+   * `runSuiteQL` costs 10 units. `getInputData` gets 10,000; `reduce` gets 5,000 per
+   * invocation and the module cache does not survive between them, so reading here
+   * would repeat the whole set for every record type. Once, at the front, is the only
+   * version that fits — especially now that custom list values need one query per list.
    */
-  var customCache = null
+  var metadataCache = null
 
   function customMetadata() {
-    if (!customCache) {
-      var fields = customFields.readCustomFields()
-      var lists = customFields.readCustomListValues()
-      customCache = {
-        byRecord: fields.byRecord,
-        diagnostics: fields.diagnostics,
-        listValues: lists.byList || {},
-        listError: lists.error,
+    if (!metadataCache) metadataCache = readAllMetadata()
+    return metadataCache
+  }
+
+  function readAllMetadata() {
+    var fields = customFields.readCustomFields()
+    var recordTypes = customFields.readCustomRecordTypes()
+
+    /**
+     * Select targets arrive as integer internal ids. They are resolved against the
+     * custom record types read above; an id that resolves to nothing emits **nothing**
+     * rather than a fabricated name, because `toApiName(297)` would produce `_297` and
+     * invent a relationship to a record type that does not exist.
+     */
+    var referencedLists = []
+    var byScriptId = fields.byScriptId
+    for (var scriptId in byScriptId) {
+      if (!Object.prototype.hasOwnProperty.call(byScriptId, scriptId)) continue
+      var field = byScriptId[scriptId]
+      var targetId = field.selectTargetId
+      if (!targetId) continue
+
+      var resolvedType = recordTypes.byInternalId[String(targetId)]
+      if (resolvedType) {
+        field.selectRecordType = resolvedType
+        if (String(resolvedType).toLowerCase().indexOf('customlist') === 0) {
+          referencedLists.push(resolvedType)
+        }
+      } else if (/^customlist[a-z0-9_]*$/i.test(String(targetId))) {
+        // Already a script id on accounts that give one.
+        field.selectRecordType = String(targetId).toLowerCase()
+        referencedLists.push(field.selectRecordType)
+      } else if (/^\d+$|^-\d+$/.test(String(targetId))) {
+        // A number we could not resolve — most often a standard record type, whose ids
+        // are negative and are not in CustomRecordType. Recorded, never guessed at.
+        field.selectRecordType = ''
+        field.unresolvedTargetId = String(targetId)
+      } else {
+        field.selectRecordType = String(targetId).toLowerCase()
       }
     }
-    return customCache
+
+    var lists = customFields.readCustomListValues(referencedLists)
+
+    return {
+      byScriptId: byScriptId,
+      schema: fields.schema,
+      recordTypeError: recordTypes.error,
+      listValues: lists.byList || {},
+      listError: lists.error,
+      listDiagnostics: { listsRead: lists.listsRead, perList: lists.perList },
+    }
   }
 
   function reduce(context) {
@@ -229,10 +289,7 @@ define([
      * somebody wants catalogued. Discarding them because `record.create` refused would
      * throw away metadata we are holding. The skip is still reported either way.
      */
-    var merged = mergeCustomFields(
-      payload.fields || [],
-      meta.byRecord[String(context.key).toLowerCase()],
-    )
+    var merged = mergeCustomFields(payload.fields || [], meta.byScriptId)
 
     if (payload.skipped && merged.length === 0) {
       context.write({
@@ -284,6 +341,10 @@ define([
         // apart from "we could not read the metadata that names them" — which look
         // identical in the CSV and mean completely different things.
         referenceTargets: countReferenceTargets(merged),
+        // The join hit rate is the health metric that catches the uppercase-scriptid
+        // trap: thousands of metadata rows, none of them matching anything.
+        joinHits: merged.joinHits || 0,
+        customFieldsSeen: countCustomFields(merged),
       }),
     })
   }
@@ -296,75 +357,104 @@ define([
     return found
   }
 
+  function countCustomFields(mergedFields) {
+    var found = 0
+    for (var i = 0; i < mergedFields.length; i++) {
+      if (mergedFields[i].origin === 'custom') found++
+    }
+    return found
+  }
+
   /**
-   * Custom fields override the instantiated ones of the same id.
+   * A metadata type only wins if it maps to something.
    *
-   * Both sources can describe the same field — a custom field appears in `getFields()`
-   * too — but only SuiteQL carries the description and the select target. Overriding
-   * rather than appending is what stops every custom field arriving twice.
+   * `getFields()` types a custom select field correctly as `select`. If the metadata
+   * column turns out to be `fieldtype` — which holds *placement* (`BODY`, `ENTITY`),
+   * not a data type — letting it win would replace a correct type with one that maps to
+   * nothing, and the field would import untyped. That is worse than not reading the
+   * metadata at all, so a metadata value that maps to nothing is simply not used.
    */
-  function mergeCustomFields(standardFields, customList) {
-    var byApiName = {}
-    var order = []
+  function preferMapped(customRaw, existingRaw) {
+    if (customRaw && typeCatalog.catalogTypeFor(customRaw, '').mapped) return customRaw
+    return existingRaw || customRaw || ''
+  }
+
+  /**
+   * Adds what SuiteQL knows onto the fields `getFields()` already found.
+   *
+   * The join is on **lowercased script id**, and the lowercasing is not cosmetic:
+   * `customfield` stores `scriptid` in UPPERCASE while `getFields()` returns it
+   * lowercase, so joining raw produces a 0% hit rate on every account — a total failure
+   * indistinguishable from "this account has no custom fields".
+   *
+   * Ownership comes from `getFields()`, never from the metadata. `customfield` has no
+   * `appliesto*` columns and cannot answer it; the record already knows which fields
+   * are on it, so there is nothing to work out.
+   */
+  function mergeCustomFields(standardFields, byScriptId) {
+    var lookup = byScriptId || {}
+    var out = []
+    var hits = 0
 
     for (var i = 0; i < standardFields.length; i++) {
       var field = standardFields[i]
-      byApiName[field.apiName] = field
-      order.push(field.apiName)
-    }
+      var custom = lookup[String(field.externalId || field.apiName).toLowerCase()]
 
-    var extras = customList || []
-    for (var c = 0; c < extras.length; c++) {
-      var custom = extras[c]
-      if (!custom.scriptId) continue
-      var apiName = toApiName(custom.scriptId)
-      var existing = byApiName[apiName]
-
-      var merged = {
-        apiName: apiName,
-        externalId: custom.internalId || custom.scriptId,
-        label: custom.label || (existing && existing.label) || custom.scriptId,
-        rawType: custom.rawFieldType || (existing && existing.rawType) || '',
-        origin: 'custom',
-        isRequired: custom.isMandatory || (existing ? existing.isRequired : false),
-        isUnique: existing ? existing.isUnique : false,
-        isPrimaryKey: existing ? existing.isPrimaryKey : false,
-        isDeprecated: false,
-        description: custom.description || '',
-        selectRecordType: custom.selectRecordType || '',
-        options: [],
+      if (!custom) {
+        out.push(field)
+        continue
       }
 
-      byApiName[apiName] = merged
-      if (!existing) order.push(apiName)
+      hits++
+      out.push({
+        apiName: field.apiName,
+        // The metadata's internal id is the stabler identifier when we have it.
+        externalId: custom.internalId || field.externalId,
+        label: field.label || custom.label,
+        rawType: preferMapped(custom.rawFieldType, field.rawType),
+        origin: 'custom',
+        isRequired: field.isRequired || custom.isMandatory,
+        isUnique: field.isUnique,
+        isPrimaryKey: field.isPrimaryKey,
+        isDeprecated: false,
+        // The only two things SuiteQL is actually needed for.
+        description: custom.description || '',
+        selectRecordType: custom.selectRecordType || '',
+      })
     }
 
-    var out = []
-    for (var o = 0; o < order.length; o++) out.push(byApiName[order[o]])
+    out.joinHits = hits
     return out
   }
 
   /**
    * What a select field points at, when it points at a record rather than a list.
    *
-   * `selectrecordtype` holds either — a custom list is not a record and must not become
-   * a relationship, or the import would invent a parent that does not exist. Custom
-   * lists are recognised by their `customlist` prefix and excluded.
+   * Three things are excluded, each for its own reason: a custom list is not a record
+   * and must not become a relationship; a bare number is an unresolved internal id and
+   * `toApiName(297)` would invent `_297` as a parent record that does not exist; and an
+   * empty value means we never knew.
    */
   function referenceTargetOf(field) {
     var target = field.selectRecordType || ''
     if (!target) return ''
     if (String(target).toLowerCase().indexOf('customlist') === 0) return ''
-    if (/^\d+$/.test(String(target))) return ''
+    if (/^-?\d+$/.test(String(target))) return ''
     return String(target)
   }
 
-  /** Allowed values, when the select points at a custom list we could read. */
+  /**
+   * Allowed values, when the select points at a custom list we could read.
+   *
+   * Looked up by script id only. Keying list values by internal id as well meant a
+   * field whose target id happened to equal some unrelated list's id was handed that
+   * list's values — wrong data, perfectly plausible, reported by nothing.
+   */
   function optionsFor(field, meta) {
     var target = field.selectRecordType || ''
     if (!target) return []
-    var key = String(target).toLowerCase()
-    return meta.listValues[key] || meta.listValues[String(target)] || []
+    if (/^-?\d+$/.test(String(target))) return []
+    return meta.listValues[String(target).toLowerCase()] || []
   }
 
   // -------------------------------------------------------------------------
@@ -386,6 +476,8 @@ define([
     var skippedTypes = []
     var referenceTargets = 0
     var fieldCount = 0
+    var joinHits = 0
+    var customFieldsSeen = 0
 
     context.output.iterator().each(function (key, value) {
       var payload = JSON.parse(value)
@@ -398,6 +490,8 @@ define([
         fieldCount += payload.rows.length
       }
       referenceTargets += payload.referenceTargets || 0
+      joinHits += payload.joinHits || 0
+      customFieldsSeen += payload.customFieldsSeen || 0
       for (var raw in payload.unmapped || {}) {
         if (!Object.prototype.hasOwnProperty.call(payload.unmapped, raw)) continue
         unmapped[raw] = (unmapped[raw] || 0) + payload.unmapped[raw]
@@ -423,7 +517,13 @@ define([
       written.push({ name: name, id: handle.save(), rows: parts[i].length })
     }
 
-    var health = describeHealth(fieldCount, referenceTargets, groups.length)
+    var health = describeHealth({
+      fields: fieldCount,
+      referenceTargets: referenceTargets,
+      recordTypes: groups.length,
+      joinHits: joinHits,
+      customFieldsSeen: customFieldsSeen,
+    })
     writeReport(folderId, written, health, unmapped, skippedTypes)
     logSummary(written, unmapped, skippedTypes, health, context)
   }
@@ -441,38 +541,117 @@ define([
    * So the export now decides, and says, whether it is complete — and an empty
    * reference-target count is treated as a symptom rather than as an answer.
    */
-  function describeHealth(fieldCount, referenceTargets, recordCount) {
+  function describeHealth(counts) {
     var meta = customMetadata()
-    var failed = []
-    var ok = []
-
-    for (var i = 0; i < meta.diagnostics.tables.length; i++) {
-      var table = meta.diagnostics.tables[i]
-      if (table.error) failed.push({ table: table.table, error: table.error })
-      else ok.push(table.table)
-    }
-
+    var schema = meta.schema
     var problems = []
-    if (failed.length && failed.length === meta.diagnostics.tables.length) {
+
+    // --- could we read the metadata at all? Three states, not two. ---------
+    if (schema.state === 'failed') {
       problems.push(
-        'No custom field metadata could be read at all. Custom fields themselves are ' +
-          'still in this export — they come from getFields() on the record — but their ' +
-          'descriptions are missing, and so is every reference target.',
+        'Custom field metadata could not be read (' +
+          schema.errorClass +
+          '): ' +
+          schema.error +
+          '. Custom fields themselves are still in this export — they come from ' +
+          'getFields() on the record — but no field has a description and no reference ' +
+          'target was derived from one.',
       )
-    } else if (failed.length) {
+    } else if (schema.state === 'empty') {
+      // Neither success nor failure. An account with no custom fields and a query that
+      // matched nothing look identical, so say which was observed rather than choosing.
       problems.push(
-        failed.length +
-          ' of ' +
-          meta.diagnostics.tables.length +
-          ' custom field metadata queries failed, so this export is missing descriptions ' +
-          'and reference targets for the record types they cover.',
+        'The ' +
+          schema.table +
+          ' table exists but returned no rows, so its columns could not be verified. ' +
+          'Either this account has no custom fields, or the query matched nothing. ' +
+          'This export contains no custom field descriptions or reference targets either way.',
       )
     }
 
-    if (referenceTargets === 0 && fieldCount > 0) {
+    // --- did the two halves actually connect? -----------------------------
+    if (schema.state === 'ok' && schema.rowsRead > 0) {
+      var rate = counts.customFieldsSeen > 0 ? counts.joinHits / counts.customFieldsSeen : 0
+      if (counts.joinHits === 0) {
+        problems.push(
+          schema.table +
+            ' returned ' +
+            schema.rowsRead +
+            ' rows but not one matched a field found on a record type. The join is on ' +
+            'script id — if this account stores it in a different case or shape than ' +
+            'getFields() returns, every row misses and the result looks exactly like an ' +
+            'account with no custom fields.',
+        )
+      } else if (counts.customFieldsSeen > 0 && rate < 0.5) {
+        problems.push(
+          'Only ' +
+            counts.joinHits +
+            ' of ' +
+            counts.customFieldsSeen +
+            ' custom fields matched a metadata row (' +
+            Math.round(rate * 100) +
+            '%). The rest have no description and no reference target.',
+        )
+      }
+    }
+
+    // --- is the column we chose for the type really the type? --------------
+    //
+    // `customfield` carries both `fieldvaluetype` (the type) and `fieldtype` (the
+    // placement: BODY, ENTITY, COLUMN). Picking the wrong one is the single mistake
+    // that would produce a confident, wholly wrong catalog rather than an empty one,
+    // and nothing else here would notice — so it is checked against the values seen.
+    var typeValues = schema.typeValueCounts || {}
+    var distinct = 0
+    var unmappedDistinct = 0
+    var placementLooking = 0
+    var samples = []
+
+    for (var value in typeValues) {
+      if (!Object.prototype.hasOwnProperty.call(typeValues, value)) continue
+      distinct++
+      if (!typeCatalog.catalogTypeFor(value, '').mapped) {
+        unmappedDistinct++
+        if (samples.length < 6) samples.push(value)
+      }
+      if (typeCatalog.isPlacementValue(value)) placementLooking++
+    }
+
+    if (distinct > 0 && (placementLooking > 0 || unmappedDistinct / distinct > 0.5)) {
+      problems.push(
+        'The column chosen for field data type (' +
+          (schema.roles.dataType || 'none') +
+          ') produced ' +
+          distinct +
+          ' distinct values, ' +
+          unmappedDistinct +
+          ' of which map to nothing: ' +
+          samples.join(', ') +
+          '. That is very likely the wrong column — customfield has both fieldvaluetype ' +
+          '(the data type) and fieldtype (the placement: BODY, COLUMN, ENTITY). Check the ' +
+          'resolution map below.',
+      )
+    }
+
+    // --- roles we could not fill -------------------------------------------
+    for (var u = 0; u < (schema.unresolved || []).length; u++) {
+      var role = schema.unresolved[u]
+      if (role.role === 'description' || role.role === 'selectTarget' || role.critical) {
+        problems.push(
+          'No column on ' +
+            schema.table +
+            ' could be used for "' +
+            role.role +
+            '", so that value is absent from every custom field rather than guessed.',
+        )
+      }
+    }
+
+    // --- the symptom that started all this ---------------------------------
+    if (counts.referenceTargets === 0 && counts.fields > 0) {
       problems.push(
         'Not one reference target was found across ' +
-          fieldCount +
+          counts.fields +
           ' fields. The catalog derives every relationship from that column, so this CSV ' +
           'will import with NO relationships. On an account of this size that is far more ' +
           'likely to be a failed metadata read than a schema with no foreign keys.',
@@ -482,15 +661,19 @@ define([
     if (meta.listError) {
       problems.push('Custom list values could not be read: ' + meta.listError)
     }
+    if (meta.recordTypeError) {
+      problems.push('Custom record types could not be read: ' + meta.recordTypeError)
+    }
 
     return {
       complete: problems.length === 0,
       problems: problems,
-      recordTypes: recordCount,
-      fields: fieldCount,
-      referenceTargets: referenceTargets,
-      metadataTablesRead: ok,
-      metadataTablesFailed: failed,
+      recordTypes: counts.recordTypes,
+      fields: counts.fields,
+      referenceTargets: counts.referenceTargets,
+      customFieldsSeen: counts.customFieldsSeen,
+      joinHits: counts.joinHits,
+      schema: schema,
     }
   }
 
@@ -501,6 +684,12 @@ define([
    * the File Cabinet reads the script log first. A sibling file with an unmissable name
    * puts the caveat where the artifact is.
    */
+  function pad(text, width) {
+    var out = String(text)
+    while (out.length < width) out += ' '
+    return out
+  }
+
   function writeReport(folderId, written, health, unmapped, skippedTypes) {
     var lines = []
     lines.push(health.complete ? 'EXPORT COMPLETE' : 'EXPORT INCOMPLETE — READ THIS FIRST')
@@ -508,6 +697,12 @@ define([
     lines.push('Record types: ' + health.recordTypes)
     lines.push('Fields:       ' + health.fields)
     lines.push('Reference targets (these become relationships): ' + health.referenceTargets)
+    lines.push(
+      'Custom fields matched to metadata: ' +
+        health.joinHits +
+        ' of ' +
+        health.customFieldsSeen,
+    )
     lines.push('')
 
     for (var p = 0; p < health.problems.length; p++) {
@@ -515,15 +710,31 @@ define([
       lines.push('')
     }
 
-    if (health.metadataTablesFailed.length) {
-      lines.push('Metadata queries that failed:')
-      for (var f = 0; f < health.metadataTablesFailed.length; f++) {
-        lines.push(
-          '  ' +
-            health.metadataTablesFailed[f].table +
-            ' -> ' +
-            health.metadataTablesFailed[f].error,
-        )
+    // The resolution map. If somebody reads `dataType -> fieldtype` here they know
+    // instantly why every custom field imported untyped; nothing else in the output
+    // says which column was chosen for which job.
+    var schema = health.schema || {}
+    lines.push('Metadata source: ' + (schema.table || 'none') + ' [' + (schema.state || 'failed') + ']')
+    if (schema.state === 'ok') {
+      lines.push('Columns used:')
+      for (var role in schema.roles) {
+        if (Object.prototype.hasOwnProperty.call(schema.roles, role)) {
+          lines.push('  ' + pad(role, 14) + ' -> ' + schema.roles[role])
+        }
+      }
+      for (var ur = 0; ur < (schema.unresolved || []).length; ur++) {
+        lines.push('  ' + pad(schema.unresolved[ur].role, 14) + ' -> (nothing matched)')
+      }
+      lines.push('')
+      lines.push('Columns this account exposes: ' + (schema.columns || []).join(', '))
+      lines.push('')
+    }
+
+    if (schema.error) {
+      lines.push('Metadata query failed [' + schema.errorClass + ']: ' + schema.error)
+      lines.push('Names tried:')
+      for (var a = 0; a < (schema.attempts || []).length; a++) {
+        lines.push('  ' + schema.attempts[a].name + ' -> ' + (schema.attempts[a].error || 'ok'))
       }
       lines.push('')
       lines.push('Run the Suitelet with &debug=1 to see what this account does support.')
@@ -616,7 +827,9 @@ define([
         title: 'This export is incomplete — see the README file written beside the CSV',
         details: JSON.stringify({
           problems: health.problems,
-          metadataTablesFailed: health.metadataTablesFailed,
+          metadataSource: health.schema ? health.schema.table : null,
+          metadataState: health.schema ? health.schema.state : null,
+          columnsUsed: health.schema ? health.schema.roles : null,
         }),
       })
     }

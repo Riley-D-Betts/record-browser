@@ -2,168 +2,198 @@ import { describe, expect, it } from 'vitest'
 import { fakeQuery, loadAmd } from './amd'
 
 /**
- * Everything in the reader is defensive because column availability varies by account,
- * feature set and version — and SuiteQL fails the *whole statement* on one unknown
- * column. These tests are the ones that prove a partial answer beats no answer.
+ * These fixtures are the real `customfield` shape.
+ *
+ * The previous ones were `entityCustomField` rows carrying `label`, `selectrecordtype`
+ * and `appliestocustomer` — a schema that exists on no NetSuite account. The suite was
+ * green *because* it encoded the mistake, which is how the bug survived two rounds. A
+ * fixture is a claim about the world, and a wrong one is worse than no test.
+ *
+ * The real table has: `internalid`, `scriptid` (UPPERCASE), `name` (not `label`),
+ * `description`, `fieldtype` (placement — BODY/ENTITY), `fieldvaluetype` (the actual
+ * data type), `fieldvaluetyperecord` (select target, an integer id), `ismandatory`,
+ * `owner`, `recordtype`. No `appliesto*` columns at all.
  */
 
 const load = (tables: Record<string, Array<Record<string, unknown>>>) =>
   loadAmd('src/lib_customfield_query.js', { 'N/query': fakeQuery(tables) })
 
-const EMPTY = {
-  entityCustomField: [],
-  itemCustomField: [],
-  transactionBodyCustomField: [],
-  transactionColumnCustomField: [],
-  crmCustomField: [],
-  otherCustomField: [],
-  customRecordCustomField: [],
-}
-
-const fullRow = (o: Record<string, unknown> = {}) => ({
-  internalid: 1,
-  scriptid: 'custentity_loyalty_tier',
-  label: 'Loyalty Tier',
-  fieldtype: 'SELECT',
+/** One row as `customfield` really returns it, uppercase script id and all. */
+const realRow = (o: Record<string, unknown> = {}) => ({
+  internalid: 501,
+  scriptid: 'CUSTENTITY_LOYALTY_TIER',
+  name: 'Loyalty Tier',
   description: 'Which tier this customer sits in',
+  fieldtype: 'ENTITY',
+  fieldvaluetype: 'SELECT',
+  fieldvaluetyperecord: 297,
   ismandatory: 'F',
-  selectrecordtype: 'customlist_tiers',
-  appliestocustomer: 'T',
-  appliestovendor: 'F',
+  owner: 12,
+  recordtype: 4,
   ...o,
 })
 
-describe('reading a table', () => {
-  it('reads the full column set when the account has it', () => {
-    const lib = load({ ...EMPTY, entityCustomField: [fullRow()] })
-    const result = lib.readCustomFields()
-    expect(result.byRecord.customer).toHaveLength(1)
-    expect(result.byRecord.customer[0].description).toBe('Which tier this customer sits in')
+describe('the table it reads', () => {
+  it('uses customfield, and never the seven per-type names', () => {
+    // entitycustomfield and its siblings are SDF-XML / SuiteTalk-SOAP customization
+    // names. Oracle's Records Browser marks all seven inAnalytics:"F", and a real
+    // account rejected every one with "Invalid search type". No spelling works.
+    const lib = load({ customfield: [realRow()] })
+    expect(lib.readCustomFields().schema.table).toBe('customfield')
+    expect(lib.CANDIDATES).toEqual(['customfield', 'CustomField'])
+    expect(JSON.stringify(lib.CANDIDATES)).not.toMatch(/entitycustomfield/i)
   })
 
-  it('loses nothing when a column we expected is absent', () => {
-    // This is why it asks for `SELECT *` rather than a column list. A real run died on
-    // `SELECT id … FROM CustomList` with "Unknown identifier 'ID'" — SuiteQL fails the
-    // whole statement on one unknown column, so a single guessed name cost every row.
-    const lib = load({
-      ...EMPTY,
-      entityCustomField: [
-        // No `selectrecordtype`, no `description`, no `ismandatory`.
-        { internalid: 1, scriptid: 'custentity_x', label: 'X', fieldtype: 'TEXT', appliestocustomer: 'T' },
-      ],
-    })
-    const result = lib.readCustomFields()
-    expect(result.byRecord.customer).toHaveLength(1)
-    expect(result.byRecord.customer[0].scriptId).toBe('custentity_x')
-    expect(result.byRecord.customer[0].selectRecordType).toBe('')
-  })
-
-  it('reads a column under whatever name this account gives it', () => {
-    // `label` vs `name`, `ismandatory` vs `mandatory` — which spelling a table uses is
-    // precisely what has been wrong twice, so nothing reads a single hard-coded name.
-    const lib = load({
-      ...EMPTY,
-      entityCustomField: [
-        { id: 4, scriptid: 'custentity_y', name: 'Y label', type: 'TEXT', mandatory: 'T', appliestocustomer: 'T' },
-      ],
-    })
-    const field = lib.readCustomFields().byRecord.customer[0]
-    expect(field.internalId).toBe('4')
-    expect(field.label).toBe('Y label')
-    expect(field.rawFieldType).toBe('TEXT')
-    expect(field.isMandatory).toBe(true)
-  })
-
-  it('records a table it could not read at all, and carries on with the rest', () => {
-    const lib = load({ ...EMPTY, itemCustomField: [fullRow({ scriptid: 'custitem_x' })] })
-    const result = lib.readCustomFields()
-    expect(result.diagnostics.tables).toHaveLength(7)
-    expect(result.diagnostics.tables.every((t: any) => t.error === null)).toBe(true)
-  })
-
-  it('records every name it tried and what each one said', () => {
-    // The output that aims the next fix. Guessing a third spelling is not a strategy.
-    const lib = loadAmd('src/lib_customfield_query.js', {
-      'N/query': {
-        runSuiteQL({ query }: { query: string }) {
-          throw new Error(`Invalid search type: ${/FROM\\s+(\\w+)/i.exec(query)?.[1]}`)
-        },
-      },
-    })
-    const result = lib.readCustomFields()
-    const entity = result.diagnostics.tables.find((t: any) => t.kind === 'entity')
-    expect(entity.attempts.length).toBeGreaterThan(1)
-    expect(entity.attempts.every((a: any) => a.ok === false)).toBe(true)
-    expect(entity.attempts[0].error).toMatch(/Invalid search type/)
-  })
-
-  it('prefers a unified table when the account has one, and skips the seven probes', () => {
-    const lib = loadAmd('src/lib_customfield_query.js', {
-      'N/query': fakeQuery({
-        customfield: [
-          { internalid: 1, scriptid: 'custentity_z', label: 'Z', fieldtype: 'TEXT', rectype: 'Customer' },
-        ],
-      }),
-    })
-    const result = lib.readCustomFields()
-    expect(result.diagnostics.unified.resolved).toBe('customfield')
-    expect(result.byRecord.customer).toHaveLength(1)
-    expect(result.diagnostics.tables).toHaveLength(1)
-  })
-
-  it('reports the missing column by name, which is the actionable part', () => {
+  it('reports a missing table as absent, not as something else', () => {
     const lib = loadAmd('src/lib_customfield_query.js', {
       'N/query': {
         runSuiteQL() {
-          throw new Error('Invalid or unsupported search field: selectrecordtype')
+          throw new Error('Invalid search type: customfield')
         },
       },
     })
-    const result = lib.readCustomFields()
-    expect(result.diagnostics.tables[0].error).toMatch(/selectrecordtype/)
+    const schema = lib.readCustomFields().schema
+    expect(schema.state).toBe('failed')
+    expect(schema.errorClass).toBe('no-such-table')
   })
 })
 
-describe('working out which record owns a field', () => {
-  it('reads a custom record field from its rectype', () => {
-    const lib = load(EMPTY)
-    expect(lib.ownersOf({ rectype: 'customrecord_project' }, 'customRecord')).toEqual([
-      'customrecord_project',
-    ])
+describe('telling failures apart', () => {
+  it('knows "unknown identifier" means the table EXISTS', () => {
+    // The real account's CustomList error was this. Reporting it as "no such table"
+    // sends the next fix in exactly the wrong direction.
+    const lib = load({ customfield: [] })
+    expect(lib.classify('Unknown identifier \'"ID"\'. Available identifiers are: {customlist=CustomList}'))
+      .toBe('table-exists-bad-column')
+    expect(lib.classify('Invalid search type: entityCustomField')).toBe('no-such-table')
+    expect(lib.classify('You do not have permission to access this record')).toBe('denied')
+    expect(lib.classify('something nobody predicted')).toBe('unclassified')
+    expect(lib.classify(null)).toBe('ok')
   })
 
-  it('discovers appliesto columns rather than hard-coding their names', () => {
-    // The exact names vary and could not be confirmed without a real account. Reading
-    // whatever came back means a name we did not predict still works, and one that
-    // does not exist produces no owner rather than a wrong one.
-    const lib = load(EMPTY)
-    expect(
-      lib.ownersOf(
-        { appliestocustomer: 'T', appliestovendor: 'F', appliestosomethingnew: 'T' },
-        'entity',
-      ),
-    ).toEqual(['customer', 'somethingnew'])
+  it('never reports a permission problem as absence', () => {
+    const lib = loadAmd('src/lib_customfield_query.js', {
+      'N/query': {
+        runSuiteQL() {
+          throw new Error('Insufficient permission to run this query')
+        },
+      },
+    })
+    expect(lib.readCustomFields().schema.errorClass).toBe('denied')
   })
 
-  it('claims no owner when no flag is set, rather than guessing one', () => {
-    const lib = load(EMPTY)
-    expect(lib.ownersOf({ appliestocustomer: 'F' }, 'entity')).toEqual([])
-    expect(lib.ownersOf({ internalid: 1 }, 'entity')).toEqual([])
+  it('distinguishes an empty table from a missing one', () => {
+    // An account with no custom fields and a query that matched nothing look the same
+    // in the output unless the export says which it observed.
+    const lib = load({ customfield: [] })
+    const schema = lib.readCustomFields().schema
+    expect(schema.state).toBe('empty')
+    expect(schema.table).toBe('customfield')
+    expect(schema.error).toBeNull()
+  })
+})
+
+describe('choosing which column does which job', () => {
+  it('prefers fieldvaluetype over fieldtype for the data type', () => {
+    // The single most dangerous line in the module. `fieldtype` is the PLACEMENT
+    // (BODY/COLUMN/ENTITY); reading it as the type gives every custom field a value
+    // that maps to nothing.
+    const lib = load({ customfield: [realRow()] })
+    const schema = lib.readCustomFields().schema
+    expect(schema.roles.dataType).toBe('fieldvaluetype')
   })
 
-  it('attaches one field to every record it applies to', () => {
+  it('falls back to fieldtype only when fieldvaluetype is genuinely absent', () => {
     const lib = load({
-      ...EMPTY,
-      entityCustomField: [fullRow({ appliestocustomer: 'T', appliestovendor: 'T' })],
+      customfield: [{ internalid: 1, scriptid: 'CUSTENTITY_X', name: 'X', fieldtype: 'TEXT' }],
+    })
+    expect(lib.readCustomFields().schema.roles.dataType).toBe('fieldtype')
+  })
+
+  it('never lets one column satisfy two roles', () => {
+    // Without exclusivity, selectTarget falls through to `recordtype` — the OWNER's
+    // internal id — and every field on record type 297 gets handed the allowed values
+    // of whichever custom list happens to be id 297. Wrong data, entirely plausible.
+    const lib = load({
+      customfield: [
+        { internalid: 1, scriptid: 'CUSTENTITY_X', name: 'X', fieldvaluetype: 'TEXT', recordtype: 4 },
+      ],
+    })
+    const roles = lib.readCustomFields().schema.roles
+    expect(roles.ownerRecord).toBe('recordtype')
+    expect(roles.selectTarget).toBeUndefined()
+  })
+
+  it('reads the label from `name`, which is what the table calls it', () => {
+    const lib = load({ customfield: [realRow()] })
+    expect(lib.readCustomFields().schema.roles.label).toBe('name')
+  })
+
+  it('records every role it could not fill, rather than emitting a placeholder', () => {
+    const lib = load({
+      customfield: [{ scriptid: 'CUSTENTITY_X', fieldvaluetype: 'TEXT' }],
     })
     const result = lib.readCustomFields()
-    expect(Object.keys(result.byRecord).sort()).toEqual(['customer', 'vendor'])
+    const unresolved = result.schema.unresolved.map((u: any) => u.role)
+    expect(unresolved).toContain('description')
+    expect(unresolved).toContain('selectTarget')
+    expect(result.byScriptId.custentity_x.description).toBe('')
+  })
+
+  it('completes on an account with entirely unfamiliar columns, inventing nothing', () => {
+    const lib = load({
+      customfield: [{ weird_a: 1, weird_b: 'x', weird_c: true }],
+    })
+    const result = lib.readCustomFields()
+    expect(result.schema.state).toBe('ok')
+    expect(Object.keys(result.byScriptId)).toEqual([])
+    expect(result.schema.unresolved.length).toBeGreaterThan(5)
+    expect(result.schema.columns).toEqual(['weird_a', 'weird_b', 'weird_c'])
   })
 })
 
-describe('NetSuite’s many spellings of true', () => {
-  it('reads them all, since the tables are not consistent', () => {
-    const lib = load(EMPTY)
+describe('the uppercase script id trap', () => {
+  it('lowercases the key so the join can hit', () => {
+    // `customfield` stores scriptid UPPERCASE; getFields() returns it lowercase.
+    // Joining raw gives a 0% hit rate on every account — a total failure that looks
+    // exactly like "this account has no custom fields".
+    const lib = load({ customfield: [realRow()] })
+    const byScriptId = lib.readCustomFields().byScriptId
+    expect(Object.keys(byScriptId)).toEqual(['custentity_loyalty_tier'])
+  })
+
+  it('lowercases result keys too, since NetSuite does not promise their casing', () => {
+    const lib = load({
+      customfield: [{ INTERNALID: 9, SCRIPTID: 'CUSTENTITY_Z', NAME: 'Z', FIELDVALUETYPE: 'TEXT' }],
+    })
+    const field = lib.readCustomFields().byScriptId.custentity_z
+    expect(field.internalId).toBe('9')
+    expect(field.label).toBe('Z')
+    expect(field.rawFieldType).toBe('TEXT')
+  })
+})
+
+describe('what it reads off a row', () => {
+  it('carries the select target as the raw integer, resolving nothing itself', () => {
+    // `fieldvaluetyperecord` is an internal id. Turning 297 into a name is the
+    // caller's job, and an unresolvable one must produce nothing rather than `_297`.
+    const lib = load({ customfield: [realRow()] })
+    expect(lib.readCustomFields().byScriptId.custentity_loyalty_tier.selectTargetId).toBe('297')
+  })
+
+  it('counts the values of the type column, so the export can sanity-check it', () => {
+    const lib = load({
+      customfield: [
+        realRow({ scriptid: 'A', fieldvaluetype: 'SELECT' }),
+        realRow({ scriptid: 'B', fieldvaluetype: 'TEXT' }),
+        realRow({ scriptid: 'C', fieldvaluetype: 'TEXT' }),
+      ],
+    })
+    expect(lib.readCustomFields().schema.typeValueCounts).toEqual({ SELECT: 1, TEXT: 2 })
+  })
+
+  it('reads NetSuite’s many spellings of true', () => {
+    const lib = load({ customfield: [] })
     for (const yes of [true, 1, 'T', 'true', 'TRUE', 'yes', '1']) {
       expect(lib.isTruthyFlag(yes), String(yes)).toBe(true)
     }
@@ -173,78 +203,96 @@ describe('NetSuite’s many spellings of true', () => {
   })
 })
 
-describe('the field type this account actually returns', () => {
-  it('carries the raw value through untouched, whatever form it takes', () => {
-    // Whether this is 'SELECT' or '106' could not be settled without a real account,
-    // so nothing here interprets it — the type catalog maps a code and reports a
-    // number, and &debug=1 shows which this account gives.
-    const lib = load({ ...EMPTY, entityCustomField: [fullRow({ fieldtype: 106 })] })
-    const result = lib.readCustomFields()
-    expect(result.byRecord.customer[0].rawFieldType).toBe(106)
-  })
-
-  it('keeps a sample of raw rows so one debug run answers the question', () => {
-    const lib = load({ ...EMPTY, entityCustomField: [fullRow()] })
-    const result = lib.readCustomFields()
-    // The name that actually resolved, not the one we asked for first.
-    expect(result.diagnostics.rawSample[0].table).toBe('entitycustomfield')
-    expect(result.diagnostics.rawSample[0].row).toHaveProperty('appliestocustomer')
-  })
-})
-
-describe('custom lists', () => {
-  it('keys values by both script id and internal id', () => {
-    // `selectrecordtype` points at one or the other depending where it came from.
-    const lib = loadAmd('src/lib_customfield_query.js', {
-      'N/query': fakeQuery({
-        CustomList: [{ id: 7, scriptid: 'customlist_tiers', name: 'Tiers' }],
-        CustomListValue: [
-          { list: 7, name: 'Gold', isinactive: 'F' },
-          { list: 7, name: 'Silver', isinactive: 'F' },
-          { list: 7, name: 'Retired', isinactive: 'T' },
-        ],
-      }),
-    })
-    const result = lib.readCustomListValues()
-    expect(result.byList['7']).toEqual(['Gold', 'Silver'])
-    expect(result.byList.customlist_tiers).toEqual(['Gold', 'Silver'])
-  })
-
-  it('leaves inactive values out — they are not choices any more', () => {
-    const lib = loadAmd('src/lib_customfield_query.js', {
-      'N/query': fakeQuery({
-        CustomList: [{ id: 7, scriptid: 'customlist_x', name: 'X' }],
-        CustomListValue: [{ list: 7, name: 'Gone', isinactive: 'T' }],
-      }),
-    })
-    expect(lib.readCustomListValues().byList['7']).toEqual([])
-  })
-})
-
 describe('custom record types', () => {
-  it('lowercases the type id, since everything else keys on it', () => {
-    const lib = loadAmd('src/lib_customfield_query.js', {
-      'N/query': fakeQuery({
-        CustomRecordType: [
-          { internalid: 3, scriptid: 'CUSTOMRECORD_Project', name: 'Project', description: 'A job' },
-        ],
-      }),
+  it('maps internal id to script id, which select targets need', () => {
+    const lib = load({
+      CustomRecordType: [
+        { internalid: 297, scriptid: 'CUSTOMRECORD_Project', name: 'Project', description: 'A job' },
+      ],
     })
     const result = lib.readCustomRecordTypes()
     expect(result.rows[0].typeId).toBe('customrecord_project')
-    expect(result.rows[0].label).toBe('Project')
+    expect(result.byInternalId['297']).toBe('customrecord_project')
   })
 
-  it('returns an empty list rather than throwing when the table is unavailable', () => {
+  it('returns an empty list rather than throwing when unavailable', () => {
     const lib = loadAmd('src/lib_customfield_query.js', {
       'N/query': {
         runSuiteQL() {
-          throw new Error('no such table')
+          throw new Error('Invalid search type: customrecordtype')
         },
       },
     })
     const result = lib.readCustomRecordTypes()
     expect(result.rows).toEqual([])
-    expect(result.error).toMatch(/no such table/)
+    expect(result.errorClass).toBe('no-such-table')
+  })
+})
+
+describe('custom list values', () => {
+  /**
+   * There is no `CustomListValue` table. Each list's values live in a table named
+   * after the list's own script id.
+   */
+  it('reads each list from its own table, named after its script id', () => {
+    const lib = load({
+      CustomList: [{ internalid: 7, scriptid: 'CUSTOMLIST_TIERS', name: 'Tiers' }],
+      customlist_tiers: [
+        { id: 1, name: 'Gold', isinactive: 'F' },
+        { id: 2, name: 'Silver, tarnished', isinactive: 'F' },
+        { id: 3, name: 'Retired', isinactive: 'T' },
+      ],
+    })
+    const result = lib.readCustomListValues(['customlist_tiers'])
+    expect(result.byList.customlist_tiers).toEqual(['Gold', 'Silver, tarnished'])
+  })
+
+  it('only reads lists something actually points at', () => {
+    const lib = load({
+      CustomList: [
+        { internalid: 7, scriptid: 'CUSTOMLIST_TIERS', name: 'Tiers' },
+        { internalid: 8, scriptid: 'CUSTOMLIST_UNUSED', name: 'Unused' },
+      ],
+      customlist_tiers: [{ id: 1, name: 'Gold', isinactive: 'F' }],
+      customlist_unused: [{ id: 1, name: 'Never asked for', isinactive: 'F' }],
+    })
+    const result = lib.readCustomListValues(['customlist_tiers'])
+    expect(Object.keys(result.byList)).toEqual(['customlist_tiers'])
+    expect(result.listsRead).toBe(1)
+  })
+
+  it('keys values by script id only, never by internal id', () => {
+    // Keying by internal id is what let an unrelated list's values attach to fields
+    // whose select target merely shared a number.
+    const lib = load({
+      CustomList: [{ internalid: 297, scriptid: 'CUSTOMLIST_TIERS', name: 'Tiers' }],
+      customlist_tiers: [{ id: 1, name: 'Gold', isinactive: 'F' }],
+    })
+    const result = lib.readCustomListValues(['customlist_tiers'])
+    expect(result.byList['297']).toBeUndefined()
+  })
+
+  it('refuses a list id that is not a plain custom list id', () => {
+    // The one place a table name is interpolated from account data.
+    const lib = load({
+      CustomList: [{ internalid: 1, scriptid: 'customlist_x; DROP TABLE', name: 'Nope' }],
+    })
+    const result = lib.readCustomListValues(['customlist_x; drop table'])
+    expect(result.byList['customlist_x; drop table']).toBeUndefined()
+    expect(result.perList[0].ok).toBe(false)
+    expect(result.perList[0].error).toMatch(/Refused/)
+  })
+
+  it('records a per-list failure as data rather than losing every other list', () => {
+    const lib = load({
+      CustomList: [
+        { internalid: 7, scriptid: 'CUSTOMLIST_GOOD', name: 'Good' },
+        { internalid: 8, scriptid: 'CUSTOMLIST_GONE', name: 'Gone' },
+      ],
+      customlist_good: [{ id: 1, name: 'Yes', isinactive: 'F' }],
+    })
+    const result = lib.readCustomListValues(['customlist_good', 'customlist_gone'])
+    expect(result.byList.customlist_good).toEqual(['Yes'])
+    expect(result.perList.find((p: any) => p.list === 'customlist_gone').ok).toBe(false)
   })
 })

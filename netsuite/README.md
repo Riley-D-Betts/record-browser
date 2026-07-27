@@ -13,9 +13,20 @@ about 1,250 units before a single custom record. Map/Reduce gets 10,000 per job 
 resets governance per `map` call, so one awkward record type cannot starve the rest.
 The Suitelet only starts the job and serves the result.
 
-**`search.Type.ENTITY_CUSTOM_FIELD` does not exist.** Neither does
-`TRANSACTION_BODY_CUSTOM_FIELD` or its siblings; code referencing them throws on the
-first line. Custom metadata comes from SuiteQL via `N/query`, which is documented.
+**The per-type custom-field tables do not exist in SuiteQL.** `entitycustomfield`,
+`itemcustomfield`, `transactionbodycustomfield` and their siblings are SDF-XML and
+SuiteTalk-SOAP customization type names — Oracle's Records Browser marks all seven
+`inAnalytics:"F"`, and a production account rejected every one. Neither do the matching
+`search.Type.*` enum members. The real table is **`customfield`**, singular and unified,
+and it is the only one this queries.
+
+**SuiteQL is not used to work out which record owns a field.** It cannot: `customfield`
+has no `appliesto*` columns. It does not need to either — `getFields()` already answers
+that, because a custom field is a real field on the record. SuiteQL is asked only what
+it can answer: given a script id, the field's description, data type and select target.
+The two are joined on **lowercased** script id, because `customfield` stores it
+uppercase while `getFields()` returns it lowercase, and joining raw yields a 0% hit
+rate that looks exactly like an account with no custom fields.
 
 **Type mapping is a table, not a guess.** NetSuite spells one idea two ways —
 `Field.type` is lowercase (`text`, `select`), custom-field metadata is uppercase
@@ -96,12 +107,17 @@ CustomList        -> "Unknown identifier '"ID"'. Available identifiers are: {cus
 CustomRecordType  -> worked, 244 rows
 ```
 
-Three things follow from that, and all three are now built in.
+Four things follow from that, and all four are now built in.
 
-**`CustomRecordType` resolved in PascalCase**, so SuiteQL table lookup is not
-case-sensitive — which means those seven names are not tables on that account at all,
-and trying another casing would have been a third wrong guess. Table names are now
-*probed* from a candidate list, and every attempt is recorded with the error it gave.
+**Those seven tables do not exist, under any casing.** `CustomRecordType` resolved in
+PascalCase, so lookup is not case-sensitive — re-spelling would have been a third wrong
+guess. They were replaced with the one table that is real, `customfield`, and table
+names are now *probed* with every attempt recorded alongside the error it gave.
+
+**"Unknown identifier" was a signal we threw away.** It means the table *resolved* and
+only the column was wrong — a completely different problem from "no such table", with a
+different fix. Errors are now classified into `no-such-table`, `table-exists-bad-column`,
+`denied` and `unclassified`, and a permissions failure is never reported as absence.
 
 **One guessed column name lost every row.** `SELECT id … FROM CustomList` failed
 entirely because `id` was not a column — SuiteQL fails the whole statement on one
@@ -118,6 +134,33 @@ So the export now judges itself. It counts reference targets, and writes a compa
 file beside the CSV — `record-browser-export-INCOMPLETE-README.txt` when something is
 missing — naming what failed and what the CSV therefore does not contain. Finding zero
 reference targets across thousands of fields is treated as a symptom, not an answer.
+
+### The mistake that would have been worse than the bug
+
+`customfield` carries **both** `fieldvaluetype` (the data type: `TEXT`, `SELECT`) and
+`fieldtype` (the *placement*: `BODY`, `COLUMN`, `ENTITY`). Reading the second as the
+type yields values that map to nothing — and since metadata used to override the type
+from `getFields()`, a field correctly typed `select` would have been overwritten and
+imported with no type at all. Simply switching to the right table, without noticing
+this, would have made the export **worse than the version that read nothing**.
+
+Three things now prevent it. `fieldvaluetype` is preferred. A metadata type that maps
+to nothing never overrides one that does. And the export checks the values it actually
+saw against the placement vocabulary, so picking the wrong column produces a specific,
+named complaint rather than a catalog full of untyped fields.
+
+The report prints the resolution map for exactly this reason:
+
+```
+Columns used:
+  scriptId       -> scriptid
+  dataType       -> fieldvaluetype
+  selectTarget   -> fieldvaluetyperecord
+  description    -> description
+  label          -> name
+```
+
+If that says `dataType -> fieldtype`, you know immediately why the types are wrong.
 
 ### What survives a total metadata failure
 
@@ -146,15 +189,21 @@ That output is what to act on. If a table name works that is not in the list, ad
 does not know, add it to the relevant `pick(...)` list. Both are one-line changes, and
 the dump tells you exactly which.
 
-It also answers the two questions that could not be settled without a real account:
+Read `columnsUsed` and `dataTypeValues` first. Between them they settle what remains
+genuinely unknown:
 
-- **Does `fieldtype` come back as `TEXT` or as a number like `106`?** Both are carried
-  through untouched. The type catalog maps the code and reports a number as unmapped,
-  so a numeric account shows up as a named, counted gap rather than as silently wrong
-  types. If yours is numeric, add the ids to `TYPE_MAP` in `lib_type_catalog.js`.
-- **What are the `appliesto*` columns actually called?** The reader discovers them
-  rather than hard-coding names — it reads every key beginning `appliesto` off whatever
-  came back. A name nobody predicted still works; the dump shows you the real ones.
+- **Does the type column hold codes (`SELECT`) or display labels (`List/Record`)?** Both
+  are mapped, so either degrades to correct rather than blank. `dataTypeValues` shows a
+  histogram of what your account really contains.
+- **Did the right column get picked?** If `dataTypeValues` is full of `BODY`, `ENTITY`
+  and `COLUMN`, the placement column won and the report will already be complaining.
+- **`appliesto*` is not used at all** any more. Ownership comes from `getFields()`,
+  which cannot be wrong about which fields are on a record.
+
+The dump also runs one guarded `record.load({type:'entitycustomfield'})` probe and
+reports the result. Oracle's `objectIDMap` marks those types `inScript:"F"`, so it is
+expected to fail — nothing depends on it, but if it works on your account it would
+yield the `appliesto*` flags directly and is worth knowing.
 
 The script log after a real run is the other half of this. It lists every field type it
 could not map, with a count, so one run tells you exactly what to add.
@@ -191,6 +240,12 @@ npx vitest run netsuite/
 so the code under test is the code that uploads — nothing here exists only to be
 testable.
 
+A note on fixtures, because it matters more than usual here: the previous ones
+described `entityCustomField` rows carrying `label`, `selectrecordtype` and
+`appliestocustomer` — a schema that exists on no NetSuite account. The suite was green
+*because* it encoded the mistake, which is how it survived two rounds. The fixtures are
+now the real `customfield` shape, uppercase script ids and all.
+
 What they actually pin:
 
 - Every entry in `TYPE_MAP` lands on a key the catalog really has, checked against
@@ -204,6 +259,12 @@ What they actually pin:
 - **The full round trip**: run the Map/Reduce against a fake account, take the CSV,
   import it into a real SQLite catalog, and assert the records, fields and derived
   relationships landed — then re-import and assert nothing changed.
+- **Every silent-wrong-catalog hazard**, in `silent_wrong.test.ts`: a placement value
+  never overwrites a good type; an uppercase script id still joins, and a zero hit rate
+  complains; an unresolvable integer select target emits nothing rather than inventing
+  `_297` as a parent record; a custom list's values never attach to a field that merely
+  shares its number; and an account with entirely unfamiliar columns completes,
+  fabricates nothing, and names every role it could not fill.
 
 What they cannot pin: that NetSuite returns the shapes the fakes assume, real
 governance cost, or deployment mechanics. Those need an account, and `&debug=1` exists

@@ -78,7 +78,27 @@ define([], function () {
     IMAGE: 'binary',
     DOCUMENT: 'binary',
     FILE: 'binary',
+
+    // --- display labels ---
+    //
+    // `customfield.fieldvaluetype` may hold the label shown in the UI ("Free-Form
+    // Text") rather than the code (`TEXT`) — which of the two is account-dependent and
+    // could not be settled without one. Both spellings map to the same place, so an
+    // account on the label side degrades to *correct* rather than to blank.
+    FREEFORMTEXT: 'text',
+    LONGTEXTAREA: 'long_text',
+    RICHTEXTAREA: 'long_text',
+    LISTRECORD: 'enum',
+    MULTIPLESELECT: 'multi_enum',
+    INTEGERNUMBER: 'integer',
+    DECIMALNUMBER: 'decimal',
+    EMAILADDRESS: 'email',
+    HYPERLINK: 'url',
+    PHONENUMBER: 'text',
   }
+
+  /** The label forms that mean "a link", so a target still promotes them. */
+  var SELECT_LABELS = { LISTRECORD: true, MULTIPLESELECT: true }
 
   /** Types that are a link when they point at a record, and a picklist otherwise. */
   var SELECT_TYPES = { SELECT: true, MULTISELECT: true, RADIO: true }
@@ -107,12 +127,9 @@ define([], function () {
     var key = normaliseTypeName(rawType)
     if (!key) return { type: '', mapped: false, raw: rawType }
 
-    if (SELECT_TYPES[key] && referenceTarget) {
-      return {
-        type: key === 'MULTISELECT' ? 'multi_enum' : 'reference',
-        mapped: true,
-        raw: rawType,
-      }
+    if ((SELECT_TYPES[key] || SELECT_LABELS[key]) && referenceTarget) {
+      var many = key === 'MULTISELECT' || key === 'MULTIPLESELECT'
+      return { type: many ? 'multi_enum' : 'reference', mapped: true, raw: rawType }
     }
 
     var mapped = TYPE_MAP[key]
@@ -122,7 +139,32 @@ define([], function () {
 
   /** Does this field type carry a link at all, target or not? */
   function isSelectType(rawType) {
-    return Boolean(SELECT_TYPES[normaliseTypeName(rawType)])
+    var key = normaliseTypeName(rawType)
+    return Boolean(SELECT_TYPES[key] || SELECT_LABELS[key])
+  }
+
+  /**
+   * Values that mean *placement* rather than data type.
+   *
+   * `customfield` carries both `fieldvaluetype` (the type) and `fieldtype` (BODY,
+   * COLUMN, ENTITY…). Reading the wrong one produces values that map to nothing, so
+   * the export cross-checks its chosen column against this set and says so loudly —
+   * a blank type on every custom field is otherwise very hard to attribute.
+   */
+  var PLACEMENT_VALUES = {
+    BODY: true,
+    COLUMN: true,
+    ENTITY: true,
+    ITEM: true,
+    RECORD: true,
+    EVENT: true,
+    SCRIPT: true,
+    CRM: true,
+    OTHER: true,
+  }
+
+  function isPlacementValue(rawType) {
+    return Boolean(PLACEMENT_VALUES[normaliseTypeName(rawType)])
   }
 
   /**
@@ -150,6 +192,8 @@ define([], function () {
     normaliseTypeName: normaliseTypeName,
     catalogTypeFor: catalogTypeFor,
     isSelectType: isSelectType,
+    isPlacementValue: isPlacementValue,
+    PLACEMENT_VALUES: PLACEMENT_VALUES,
     originOfRecordType: originOfRecordType,
     originOfFieldId: originOfFieldId,
   }
